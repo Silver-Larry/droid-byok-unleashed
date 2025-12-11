@@ -83,9 +83,29 @@ def require_api_key(f):
     return decorated
 
 
+class ThinkingPrinter:
+    """Manages thinking content printing with start/end markers."""
+    _is_printing = False
+    
+    @classmethod
+    def print(cls, content):
+        """Print thinking content, with markers only at start and end."""
+        if not cls._is_printing:
+            cls._is_printing = True
+            print(f"\n{CYAN}[THINKING START]{RESET}")
+        print(f"{DIM}{content}{RESET}", end="", flush=True)
+    
+    @classmethod
+    def end(cls):
+        """Mark end of thinking block."""
+        if cls._is_printing:
+            print(f"\n{CYAN}[THINKING END]{RESET}\n")
+            cls._is_printing = False
+
+
 def print_thinking(content):
     """Print thinking content to console with colored output."""
-    print(f"{CYAN}[THINKING]{RESET} {DIM}{content}{RESET}", end="", flush=True)
+    ThinkingPrinter.print(content)
 
 
 def get_default_params():
@@ -204,6 +224,17 @@ def inject_inference_params(body):
         if reasoning_params:
             body.update(reasoning_params)
             print(f"{YELLOW}[REASONING]{RESET} Injected: {json.dumps(reasoning_params)}")
+    
+    # Inject thinking parameter for Zhipu GLM models (official API format)
+    # Format: thinking: { type: "enabled" | "disabled" }
+    # Supported models: GLM-4.6, GLM-4.6V, GLM-4.5, GLM-4.5V
+    model = body.get("model", "")
+    zhipu_thinking_models = ["glm-4.6", "glm-4.5", "glm-4.6v", "glm-4.5v"]
+    if any(m in model.lower() for m in zhipu_thinking_models):
+        # Only inject if thinking is not already set
+        if "thinking" not in body:
+            body["thinking"] = {"type": "enabled"}
+            print(f"{YELLOW}[ZHIPU]{RESET} Injected thinking.type=enabled for {model}")
     
     return body
 
@@ -333,21 +364,37 @@ def process_sse_line(line, stream_filter):
     # Extract content from the delta
     choices = data.get("choices", [])
     if not choices:
-        return line, ""
+        # Pass through chunks without choices (e.g., prompt_filter_results from Azure/OpenAI)
+        return f"data: {json.dumps(data)}", ""
     
     delta = choices[0].get("delta", {})
+    
+    # Handle reasoning_content field (Claude thinking models in streaming)
+    reasoning_content = delta.pop("reasoning_content", None)
+    if reasoning_content:
+        # Print to console but don't forward (content only, no prefix)
+        print_thinking(reasoning_content)
+    
+    # Handle reasoning field (some providers)
+    reasoning = delta.pop("reasoning", None)
+    if reasoning:
+        print_thinking(reasoning)
+    
     content = delta.get("content", "")
     
     if not content:
+        # If we removed reasoning fields, still need to forward the modified chunk
+        if reasoning_content or reasoning:
+            return f"data: {json.dumps(data, ensure_ascii=False)}", ""
         return line, ""
     
-    # Filter the content
+    # Filter the content for <think> tags
     filtered_content, thinking_content = stream_filter.process_chunk(content)
     
     # Update the delta with filtered content
     if filtered_content:
         delta["content"] = filtered_content
-        return f"data: {json.dumps(data)}", thinking_content
+        return f"data: {json.dumps(data, ensure_ascii=False)}", thinking_content
     elif thinking_content:
         # Only thinking content, don't forward this chunk
         return None, thinking_content
@@ -361,7 +408,13 @@ def stream_response(upstream_response, api_format="openai"):
     stream_filter = StreamFilter() if REASONING_CONFIG.filter_thinking_tags else None
     line_buffer = ""
     
-    for chunk in upstream_response.iter_content(chunk_size=None, decode_unicode=True):
+    # Use iter_lines with proper UTF-8 decoding to avoid encoding issues
+    # iter_content with decode_unicode=True can cause issues when charset is not properly set
+    for chunk in upstream_response.iter_content(chunk_size=None):
+        if not chunk:
+            continue
+        # Explicitly decode as UTF-8
+        chunk = chunk.decode('utf-8', errors='replace')
         if not chunk:
             continue
         
@@ -416,26 +469,44 @@ def stream_response(upstream_response, api_format="openai"):
             }
             yield f"data: {json.dumps(final_chunk)}\n"
         
-        # End thinking output with newline
-        print()
+        # End thinking output
+        ThinkingPrinter.end()
 
 
 def filter_non_stream_response(response_data):
-    """Filter <think> blocks from non-streaming response."""
+    """Filter thinking content from non-streaming response.
+    
+    Handles multiple formats:
+    1. <think>...</think> tags in content (DeepSeek, Qwen)
+    2. reasoning_content field (Claude/Anthropic via OpenAI-compatible API)
+    3. reasoning field (some providers)
+    """
     choices = response_data.get("choices", [])
     
     for choice in choices:
         message = choice.get("message", {})
         content = message.get("content", "")
         
+        # Handle reasoning_content field (Claude thinking models)
+        reasoning_content = message.pop("reasoning_content", None)
+        if reasoning_content:
+            print(f"\n{YELLOW}[THINKING]{RESET} (reasoning_content)")
+            print(f"{DIM}{reasoning_content[:500]}{'...' if len(reasoning_content) > 500 else ''}{RESET}")
+        
+        # Handle reasoning field (some providers)
+        reasoning = message.pop("reasoning", None)
+        if reasoning:
+            print(f"\n{YELLOW}[THINKING]{RESET} (reasoning)")
+            print(f"{DIM}{reasoning[:500]}{'...' if len(reasoning) > 500 else ''}{RESET}")
+        
         if content:
-            # Extract and print thinking content
+            # Extract and print thinking content from <think> tags
             think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
             thinking_matches = think_pattern.findall(content)
             
             for thinking in thinking_matches:
-                print(f"\n{YELLOW}[THINKING]{RESET}")
-                print(f"{DIM}{thinking}{RESET}")
+                print(f"\n{YELLOW}[THINKING]{RESET} (<think> tag)")
+                print(f"{DIM}{thinking[:500]}{'...' if len(thinking) > 500 else ''}{RESET}")
             
             # Remove thinking blocks from content
             filtered_content = think_pattern.sub("", content)
@@ -450,12 +521,32 @@ def chat_completions():
     """Handle chat completion requests."""
     # Get request body
     body = request.get_json()
+    original_keys = list(body.keys())
+    original_thinking = body.get('thinking')
+    original_reasoning_effort = body.get('reasoning_effort')
+    
+    # Log incoming request for debugging
+    print(f"\n{CYAN}[REQUEST]{RESET} Model: {body.get('model')}, Stream: {body.get('stream')}")
+    print(f"{CYAN}[REQUEST]{RESET} Messages: {len(body.get('messages', []))} items")
+    
+    # Debug: print original request params (before injection)
+    print(f"{CYAN}[DEBUG ORIGINAL]{RESET} Keys: {original_keys}")
+    print(f"{CYAN}[DEBUG ORIGINAL]{RESET} thinking: {original_thinking}, reasoning_effort: {original_reasoning_effort}")
     
     # Inject inference parameters
     body = inject_inference_params(body)
     
+    # Debug: print final request params (after injection)
+    print(f"{CYAN}[DEBUG FINAL]{RESET} Keys: {list(body.keys())}")
+    print(f"{CYAN}[DEBUG FINAL]{RESET} thinking: {body.get('thinking')}")
+    
     # Get API key and base URL from headers or use defaults
-    api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
+    # If proxy_api_key is set, the Authorization header is used for proxy auth,
+    # so we should use UPSTREAM_API_KEY for upstream calls
+    if PROXY_CONFIG.proxy_api_key:
+        api_key = UPSTREAM_API_KEY
+    else:
+        api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
     base_url = request.headers.get("X-Upstream-Base-URL") or UPSTREAM_BASE_URL
     
     # Get API format from header or config
@@ -487,13 +578,18 @@ def chat_completions():
         )
         upstream_response.raise_for_status()
     except requests.RequestException as e:
+        # Log detailed error info
+        print(f"{RED}[ERROR]{RESET} Request failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"{RED}[ERROR]{RESET} Status: {e.response.status_code}")
+            print(f"{RED}[ERROR]{RESET} Response: {e.response.text[:500]}")
         return {"error": str(e)}, 502
     
     if is_stream:
         # Stream response with filtering
         return Response(
             stream_with_context(stream_response(upstream_response, api_format)),
-            content_type="text/event-stream",
+            content_type="text/event-stream; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
@@ -559,7 +655,12 @@ def update_proxy_config():
 def list_models():
     """Proxy models endpoint."""
     # Get API key and base URL from headers or use defaults
-    api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
+    # If proxy_api_key is set, the Authorization header is used for proxy auth,
+    # so we should use UPSTREAM_API_KEY for upstream calls
+    if PROXY_CONFIG.proxy_api_key:
+        api_key = UPSTREAM_API_KEY
+    else:
+        api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
     base_url = request.headers.get("X-Upstream-Base-URL") or UPSTREAM_BASE_URL
     
     headers = {"Authorization": f"Bearer {api_key}"}

@@ -43,7 +43,11 @@ class OpenAIAdapter(ApiFormatAdapter):
         return response
     
     def get_endpoint(self, base_url: str) -> str:
-        return f"{base_url.rstrip('/')}/v1/chat/completions"
+        base_url = base_url.rstrip('/')
+        # If base_url ends with version path (e.g., /v4, /v1), skip adding /v1
+        if base_url.endswith(('/v1', '/v2', '/v3', '/v4', '/v5')):
+            return f"{base_url}/chat/completions"
+        return f"{base_url}/v1/chat/completions"
     
     def get_headers(self, api_key: str) -> Dict[str, str]:
         return {
