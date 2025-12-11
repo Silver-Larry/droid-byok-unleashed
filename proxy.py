@@ -1,0 +1,599 @@
+"""
+Droid BYOK Proxy - A middleware proxy for intercepting and processing
+requests/responses between Droid CLI and upstream inference providers.
+
+Features:
+- Request enhancement with inference parameters
+- Reasoning model parameter injection (DeepSeek, OpenAI, Anthropic, etc.)
+- Stream filtering to remove <think>...</think> blocks
+- Colored console output for thinking process visualization
+- Flexible LLM parameter configuration via environment variables
+- Configurable proxy port and API key authentication
+"""
+
+import os
+import json
+import re
+from functools import wraps
+from flask import Flask, request, Response, stream_with_context
+from flask_cors import CORS
+import requests
+
+from reasoning_config import ReasoningConfig, get_reasoning_types_info
+from reasoning_builder import build_reasoning_params
+from proxy_config import ProxyConfig
+from api_format_adapter import get_adapter, transform_stream_chunk
+
+app = Flask(__name__)
+CORS(app)
+
+# Load proxy configuration
+PROXY_CONFIG = ProxyConfig.load()
+
+# Legacy compatibility - use PROXY_CONFIG values
+UPSTREAM_API_KEY = PROXY_CONFIG.upstream_api_key
+UPSTREAM_BASE_URL = PROXY_CONFIG.upstream_base_url
+PROXY_PORT = PROXY_CONFIG.proxy_port
+
+# Load reasoning configuration
+REASONING_CONFIG = ReasoningConfig.from_env()
+
+# LLM Parameter Configuration
+# Defines supported parameters with their types and valid ranges
+LLM_PARAMS_CONFIG = {
+    "temperature": {"type": float, "range": (0, 2)},
+    "top_p": {"type": float, "range": (0, 1)},
+    "top_k": {"type": int, "range": (1, 100)},
+    "max_tokens": {"type": int, "range": (1, 1000000)},
+    "presence_penalty": {"type": float, "range": (-2, 2)},
+    "frequency_penalty": {"type": float, "range": (-2, 2)},
+    "seed": {"type": int, "range": (0, 2**31 - 1)},
+}
+
+# Parameters that should be passed through without validation
+PASSTHROUGH_PARAMS = {"stop", "logit_bias", "response_format", "tools", "tool_choice", "user"}
+
+# ANSI color codes for console output
+CYAN = "\033[96m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
+DIM = "\033[2m"
+
+
+def require_api_key(f):
+    """
+    API Key 验证装饰器
+    如果设置了 PROXY_API_KEY，则验证请求中的 Authorization header
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # 如果未设置 API Key，跳过验证
+        if not PROXY_CONFIG.proxy_api_key:
+            return f(*args, **kwargs)
+        
+        auth_header = request.headers.get("Authorization", "")
+        provided_key = auth_header.replace("Bearer ", "")
+        
+        if provided_key != PROXY_CONFIG.proxy_api_key:
+            print(f"{RED}[AUTH]{RESET} Invalid API key from {request.remote_addr}")
+            return {"error": "Invalid or missing API key"}, 401
+        
+        return f(*args, **kwargs)
+    return decorated
+
+
+def print_thinking(content):
+    """Print thinking content to console with colored output."""
+    print(f"{CYAN}[THINKING]{RESET} {DIM}{content}{RESET}", end="", flush=True)
+
+
+def get_default_params():
+    """
+    Load default LLM parameters from environment variables.
+    Environment variable format: DEFAULT_{PARAM_NAME} (uppercase)
+    Example: DEFAULT_TEMPERATURE=0.7
+    """
+    defaults = {}
+    for param, config in LLM_PARAMS_CONFIG.items():
+        env_key = f"DEFAULT_{param.upper()}"
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            try:
+                defaults[param] = config["type"](env_val)
+            except (ValueError, TypeError) as e:
+                print(f"{YELLOW}[WARNING]{RESET} Invalid value for {env_key}: {env_val} - {e}")
+    return defaults
+
+
+def validate_param(name, value, config):
+    """
+    Validate parameter value against its configuration.
+    Returns (is_valid, warning_message).
+    """
+    if value is None:
+        return True, None
+    
+    param_type = config.get("type")
+    if param_type and not isinstance(value, param_type):
+        try:
+            value = param_type(value)
+        except (ValueError, TypeError):
+            return False, f"Parameter {name} should be of type {param_type.__name__}"
+    
+    if "range" in config:
+        min_val, max_val = config["range"]
+        if not (min_val <= value <= max_val):
+            return False, f"Parameter {name}={value} out of range [{min_val}, {max_val}]"
+    
+    return True, None
+
+
+def merge_params(body, defaults):
+    """
+    Merge request parameters with defaults.
+    Request parameters take precedence over defaults.
+    """
+    for param, value in defaults.items():
+        if param not in body:
+            body[param] = value
+    return body
+
+
+def sanitize_params(body):
+    """
+    Sanitize and validate LLM parameters in the request body.
+    - Validates parameters against their configurations
+    - Removes None values
+    - Logs warnings for invalid parameters but doesn't block the request
+    """
+    params_to_remove = []
+    
+    for param, config in LLM_PARAMS_CONFIG.items():
+        if param in body:
+            value = body[param]
+            if value is None:
+                params_to_remove.append(param)
+                continue
+            
+            is_valid, warning = validate_param(param, value, config)
+            if not is_valid:
+                print(f"{YELLOW}[WARNING]{RESET} {warning}")
+    
+    for param in params_to_remove:
+        del body[param]
+    
+    return body
+
+
+def inject_inference_params(body):
+    """
+    Inject and process inference parameters.
+    
+    This function:
+    1. Loads default parameters from environment variables
+    2. Merges defaults with request parameters (request takes precedence)
+    3. Validates and sanitizes all parameters
+    4. Injects reasoning parameters if enabled
+    
+    Supported parameters:
+    - temperature: Controls randomness (0-2)
+    - top_p: Nucleus sampling threshold (0-1)
+    - top_k: Top-k sampling (1-100)
+    - max_tokens: Maximum output tokens
+    - presence_penalty: Penalize new tokens based on presence (-2 to 2)
+    - frequency_penalty: Penalize new tokens based on frequency (-2 to 2)
+    - seed: Random seed for reproducibility
+    - stop: Stop sequences (list of strings)
+    
+    Reasoning parameters (when REASONING_ENABLED=true):
+    - DeepSeek: thinking.type
+    - OpenAI: reasoning_effort
+    - Anthropic: thinking.budget_tokens
+    - Gemini: thinkingConfig
+    - Qwen: enable_thinking, thinking_budget
+    - OpenRouter: reasoning.enabled, reasoning.effort
+    """
+    defaults = get_default_params()
+    body = merge_params(body, defaults)
+    body = sanitize_params(body)
+    
+    # Inject reasoning parameters if enabled
+    if REASONING_CONFIG.enabled:
+        reasoning_params = build_reasoning_params(REASONING_CONFIG)
+        if reasoning_params:
+            body.update(reasoning_params)
+            print(f"{YELLOW}[REASONING]{RESET} Injected: {json.dumps(reasoning_params)}")
+    
+    return body
+
+
+class StreamFilter:
+    """
+    A stateful stream filter that removes <think>...</think> blocks
+    from SSE ream chunks while handling cross-chunk tag boundaries.
+    """
+    
+    def __init__(self):
+        self.buffer = ""
+        self.inside_think = False
+        self.potential_tag_start = ""
+    
+    def process_chunk(self, chunk):
+        """
+        Process a chunk of text, filtering out <think> blocks.
+        Returns (text_to_forward, thinking_text).
+        """
+        text = self.buffer + chunk
+        self.buffer = ""
+        
+        output = []
+        thinking = []
+        i = 0
+        
+        while i < len(text):
+            if self.inside_think:
+                # Look for </think>
+                end_pos = text.find("</think>", i)
+                if end_pos != -1:
+                    # Found closing tag
+                    thinking.append(text[i:end_pos])
+                    self.inside_think = False
+                    i = end_pos + len("</think>")
+                else:
+                    # Check if we might have a partial </think> at the end
+                    partial_match = self._check_partial_end_tag(text, i)
+                    if partial_match > 0:
+                        thinking.append(text[i:len(text) - partial_match])
+                        self.buffer = text[len(text) - partial_match:]
+                        break
+                    else:
+                        thinking.append(text[i:])
+                        break
+            else:
+                # Look for <think>
+                start_pos = text.find("<think>", i)
+                if start_pos != -1:
+                    # Found opening tag
+                    output.append(text[i:start_pos])
+                    self.inside_think = True
+                    i = start_pos + len("<think>")
+                else:
+                    # Check if we might have a partial <think> at the end
+                    partial_match = self._check_partial_start_tag(text, i)
+                    if partial_match > 0:
+                        output.append(text[i:len(text) - partial_match])
+                        self.buffer = text[len(text) - partial_match:]
+                        break
+                    else:
+                        output.append(text[i:])
+                        break
+        
+        return "".join(output), "".join(thinking)
+    
+    def _check_partial_start_tag(self, text, start_idx):
+        """Check if text ends with a partial <think> tag."""
+        tag = "<think>"
+        remaining = text[start_idx:]
+        for length in range(min(len(tag) - 1, len(remaining)), 0, -1):
+            if remaining.endswith(tag[:length]):
+                return length
+        return 0
+    
+    def _check_partial_end_tag(self, text, start_idx):
+        """Check if text ends with a partial </think> tag."""
+        tag = "</think>"
+        remaining = text[start_idx:]
+        for length in range(min(len(tag) - 1, len(remaining)), 0, -1):
+            if remaining.endswith(tag[:length]):
+                return length
+        return 0
+    
+    def flush(self):
+        """Flush any remaining buffer content."""
+        if self.buffer:
+            if self.inside_think:
+                result = ("", self.buffer)
+            else:
+                result = (self.buffer, "")
+            self.buffer = ""
+            return result
+        return ("", "")
+
+
+def process_sse_line(line, stream_filter):
+    """
+    Process a single SSE line, filtering <think> blocks from content.
+    Returns (modified_line, thinking_content).
+    """
+    if not line.startswith("data: "):
+        return line, ""
+    
+    data_str = line[6:]  # Remove "data: " prefix
+    
+    if data_str.strip() == "[DONE]":
+        # Flush remaining buffer
+        remaining, thinking = stream_filter.flush()
+        if remaining:
+            # Create a final chunk with remaining content
+            final_chunk = {
+                "choices": [{
+                    "delta": {"content": remaining},
+                    "index": 0
+                }]
+            }
+            return f"data: {json.dumps(final_chunk)}", thinking
+        return line, thinking
+    
+    try:
+        data = json.loads(data_str)
+    except json.JSONDecodeError:
+        return line, ""
+    
+    # Extract content from the delta
+    choices = data.get("choices", [])
+    if not choices:
+        return line, ""
+    
+    delta = choices[0].get("delta", {})
+    content = delta.get("content", "")
+    
+    if not content:
+        return line, ""
+    
+    # Filter the content
+    filtered_content, thinking_content = stream_filter.process_chunk(content)
+    
+    # Update the delta with filtered content
+    if filtered_content:
+        delta["content"] = filtered_content
+        return f"data: {json.dumps(data)}", thinking_content
+    elif thinking_content:
+        # Only thinking content, don't forward this chunk
+        return None, thinking_content
+    else:
+        return None, ""
+
+
+def stream_response(upstream_response, api_format="openai"):
+    """Generator that streams filtered response."""
+    # Only create filter if filtering is enabled
+    stream_filter = StreamFilter() if REASONING_CONFIG.filter_thinking_tags else None
+    line_buffer = ""
+    
+    for chunk in upstream_response.iter_content(chunk_size=None, decode_unicode=True):
+        if not chunk:
+            continue
+        
+        line_buffer += chunk
+        
+        while "\n" in line_buffer:
+            line, line_buffer = line_buffer.split("\n", 1)
+            line = line.strip()
+            
+            if not line:
+                yield "\n"
+                continue
+            
+            # If filtering is disabled, pass through directly
+            if stream_filter is None:
+                yield line + "\n"
+                continue
+            
+            modified_line, thinking = process_sse_line(line, stream_filter)
+            
+            # Print thinking content to console
+            if thinking:
+                print_thinking(thinking)
+            
+            # Forward filtered content
+            if modified_line:
+                yield modified_line + "\n"
+    
+    # Process any remaining content in buffer
+    if line_buffer.strip():
+        if stream_filter is None:
+            yield line_buffer.strip() + "\n"
+        else:
+            modified_line, thinking = process_sse_line(line_buffer.strip(), stream_filter)
+            if thinking:
+                print_thinking(thinking)
+            if modified_line:
+                yield modified_line + "\n"
+    
+    # Final flush (only if filtering is enabled)
+    if stream_filter is not None:
+        remaining, thinking = stream_filter.flush()
+        if thinking:
+            print_thinking(thinking)
+        if remaining:
+            final_chunk = {
+                "choices": [{
+                    "delta": {"content": remaining},
+                    "index": 0,
+                    "finish_reason": None
+                }]
+            }
+            yield f"data: {json.dumps(final_chunk)}\n"
+        
+        # End thinking output with newline
+        print()
+
+
+def filter_non_stream_response(response_data):
+    """Filter <think> blocks from non-streaming response."""
+    choices = response_data.get("choices", [])
+    
+    for choice in choices:
+        message = choice.get("message", {})
+        content = message.get("content", "")
+        
+        if content:
+            # Extract and print thinking content
+            think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+            thinking_matches = think_pattern.findall(content)
+            
+            for thinking in thinking_matches:
+                print(f"\n{YELLOW}[THINKING]{RESET}")
+                print(f"{DIM}{thinking}{RESET}")
+            
+            # Remove thinking blocks from content
+            filtered_content = think_pattern.sub("", content)
+            message["content"] = filtered_content
+    
+    return response_data
+
+
+@app.route("/v1/chat/completions", methods=["POST"])
+@require_api_key
+def chat_completions():
+    """Handle chat completion requests."""
+    # Get request body
+    body = request.get_json()
+    
+    # Inject inference parameters
+    body = inject_inference_params(body)
+    
+    # Get API key and base URL from headers or use defaults
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
+    base_url = request.headers.get("X-Upstream-Base-URL") or UPSTREAM_BASE_URL
+    
+    # Get API format from header or config
+    api_format = request.headers.get("X-API-Format") or PROXY_CONFIG.upstream_api_format or "openai"
+    
+    # Get the appropriate adapter for the API format
+    adapter = get_adapter(api_format)
+    
+    # Transform request body for the target API format
+    transformed_body = adapter.transform_request(body)
+    
+    # Get headers for the target API format
+    headers = adapter.get_headers(api_key)
+    
+    # Get the endpoint for the target API format
+    upstream_url = adapter.get_endpoint(base_url)
+    is_stream = body.get("stream", False)
+    
+    print(f"\n{YELLOW}[PROXY]{RESET} Forwarding request to {upstream_url}")
+    print(f"{YELLOW}[PROXY]{RESET} Stream mode: {is_stream}, API format: {api_format}")
+    
+    try:
+        upstream_response = requests.post(
+            upstream_url,
+            headers=headers,
+            json=transformed_body,
+            stream=is_stream,
+            timeout=300
+        )
+        upstream_response.raise_for_status()
+    except requests.RequestException as e:
+        return {"error": str(e)}, 502
+    
+    if is_stream:
+        # Stream response with filtering
+        return Response(
+            stream_with_context(stream_response(upstream_response, api_format)),
+            content_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+    else:
+        # Non-streaming response
+        response_data = upstream_response.json()
+        # Transform response to OpenAI format if needed
+        transformed_response = adapter.transform_response(response_data)
+        filtered_data = filter_non_stream_response(transformed_response)
+        return filtered_data
+
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy", "upstream": UPSTREAM_BASE_URL}
+
+
+@app.route("/v1/config/reasoning", methods=["GET"])
+def get_reasoning_config():
+    """Get current reasoning configuration (for frontend)."""
+    return REASONING_CONFIG.to_dict()
+
+
+@app.route("/v1/config/reasoning/types", methods=["GET"])
+def get_reasoning_types():
+    """Get supported reasoning types and effort levels (for frontend dropdown)."""
+    return get_reasoning_types_info()
+
+
+@app.route("/v1/config/proxy", methods=["GET"])
+def get_proxy_config():
+    """Get current proxy configuration (for frontend)."""
+    return PROXY_CONFIG.to_dict(hide_secrets=True)
+
+
+@app.route("/v1/config/proxy", methods=["PUT"])
+def update_proxy_config():
+    """Update proxy configuration."""
+    data = request.get_json()
+    if not data:
+        return {"error": "No data provided"}, 400
+    
+    result = PROXY_CONFIG.update(**data)
+    
+    if not result.get("success"):
+        return {"error": result.get("error", "Unknown error")}, 400
+    
+    # Log the update
+    if result.get("restart_required"):
+        print(f"{YELLOW}[CONFIG]{RESET} Configuration updated. Restart required for port change.")
+    else:
+        print(f"{YELLOW}[CONFIG]{RESET} Configuration updated.")
+    
+    return result
+
+
+@app.route("/v1/models", methods=["GET"])
+@require_api_key
+def list_models():
+    """Proxy models endpoint."""
+    # Get API key and base URL from headers or use defaults
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
+    base_url = request.headers.get("X-Upstream-Base-URL") or UPSTREAM_BASE_URL
+    
+    headers = {"Authorization": f"Bearer {api_key}"}
+    upstream_url = f"{base_url.rstrip('/')}/v1/models"
+    
+    try:
+        response = requests.get(upstream_url, headers=headers, timeout=30)
+        return response.json(), response.status_code
+    except requests.RequestException as e:
+        return {"error": str(e)}, 502
+
+
+if __name__ == "__main__":
+    print(f"{YELLOW}=" * 60 + RESET)
+    print(f"{YELLOW}Droid BYOK Proxy Server{RESET}")
+    print(f"{YELLOW}=" * 60 + RESET)
+    print(f"Upstream URL: {UPSTREAM_BASE_URL}")
+    print(f"Listening on: http://localhost:{PROXY_PORT}")
+    print(f"{YELLOW}=" * 60 + RESET)
+    
+    if not UPSTREAM_API_KEY:
+        print(f"\n{YELLOW}[WARNING]{RESET} UPSTREAM_API_KEY not set!")
+    
+    # Print reasoning configuration
+    if REASONING_CONFIG.enabled:
+        print(f"\n{CYAN}[REASONING]{RESET} Enabled")
+        print(f"  Type: {REASONING_CONFIG.reasoning_type.value}")
+        print(f"  Effort: {REASONING_CONFIG.effort.value}")
+        if REASONING_CONFIG.budget_tokens:
+            print(f"  Budget Tokens: {REASONING_CONFIG.budget_tokens}")
+        print(f"  Filter <think> tags: {REASONING_CONFIG.filter_thinking_tags}")
+    else:
+        print(f"\n{DIM}[REASONING] Disabled{RESET}")
+    
+    print(f"{YELLOW}=" * 60 + RESET)
+    
+    app.run(host="0.0.0.0", port=PROXY_PORT, debug=False, threaded=True)

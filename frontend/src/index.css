@@ -1,0 +1,172 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-mono: "Fira Code", monospace;
+  --font-sans: "Fira Code", monospace;
+  --font-pixel: "Press Start 2P", cursive;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius: 0rem;
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+}
+
+:root {
+  --radius: 0rem;
+
+  /* Quiet Light (VSCode) */
+  --background: #F5F5F5;
+  --foreground: #333333;
+
+  --card: #F2F2F2;
+  --card-foreground: #333333;
+
+  --popover: #F2F2F2;
+  --popover-foreground: #333333;
+
+  --primary: #705697;
+  --primary-foreground: #FFFFFF;
+
+  --secondary: #EDEDF5;
+  --secondary-foreground: #333333;
+
+  --muted: #E0E0E0;
+  --muted-foreground: #6D705B;
+
+  --accent: #c4b7d7;
+  --accent-foreground: #705697;
+
+  --destructive: #C73D20;
+  --destructive-foreground: #FFFFFF;
+
+  --border: #C9D0D9;
+  --input: #C9D0D9;
+  --ring: #9769dc;
+
+  --chart-1: #705697;
+  --chart-2: #749351;
+  --chart-3: #9C5D27;
+  --chart-4: #AA3731;
+  --chart-5: #4B69C6;
+}
+
+.dark {
+  /* Visual Studio Dark theme */
+  --background: #1e1e1e;
+  --foreground: #d4d4d4;
+  --card: #252526;
+  --card-foreground: #d4d4d4;
+  --popover: #252526;
+  --popover-foreground: #cccccc;
+  --primary: #0e639c;
+  --primary-foreground: #ffffff;
+  --secondary: #3a3d41;
+  --secondary-foreground: #d4d4d4;
+  --muted: #2d2d30;
+  --muted-foreground: #a6a6a6;
+  --accent: #3a3d41;
+  --accent-foreground: #007acc;
+  --destructive: #f44747;
+  --destructive-foreground: #ffffff;
+  --border: #454545;
+  --input: #3c3c3c;
+  --ring: #007acc;
+  --chart-1: #007acc;
+  --chart-2: #569cd6;
+  --chart-3: #4ec9b0;
+  --chart-4: #9cdcfe;
+  --chart-5: #6a9955;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground font-mono antialiased;
+    margin: 0;
+    min-height: 100vh;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-background;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border border border-background;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted;
+  }
+}
+
+@layer utilities {
+  .rounded-lg,
+  .rounded-md,
+  .rounded-sm,
+  .rounded,
+  .rounded-xl,
+  .rounded-2xl,
+  .rounded-full {
+    border-radius: 0 !important;
+  }
+
+  .scanline {
+    display: none;
+  }
+
+  .text-glow {
+    text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+  }
+
+  .border-glow {
+    box-shadow: 0 0 10px rgba(0, 255, 0, 0.2);
+  }
+}
