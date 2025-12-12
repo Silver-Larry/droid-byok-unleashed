@@ -213,7 +213,7 @@ class ConfigManager:
                 print(f"[WARNING] Failed to load config file: {e}")
                 self._create_default()
         else:
-            self._migrate_legacy_config()
+            self._create_default()
 
     def _parse_config(self, data: Dict[str, Any]):
         """Parse configuration data"""
@@ -260,77 +260,6 @@ class ConfigManager:
             ),
         )
         self.profiles = [default_profile]
-        self.default_profile_id = "default"
-        self._save()
-
-    def _migrate_legacy_config(self):
-        """Migrate from legacy configuration files"""
-        import os
-        profiles = []
-
-        # Migrate from model_routes.json
-        routes_file = Path(__file__).parent / "model_routes.json"
-        if routes_file.exists():
-            try:
-                with open(routes_file, "r", encoding="utf-8") as f:
-                    routes_data = json.load(f)
-                for route in routes_data.get("routes", []):
-                    profile = Profile(
-                        id=route.get("id", f"profile-{uuid.uuid4().hex[:8]}"),
-                        name=route.get("name", "Migrated Route"),
-                        model_patterns=[route.get("pattern", "*")],
-                        match_type=route.get("match_type", "wildcard"),
-                        priority=route.get("priority", 0),
-                        enabled=route.get("enabled", True),
-                        upstream=UpstreamConfig(
-                            base_url=route.get("upstream_base_url", os.getenv("UPSTREAM_BASE_URL", "https://api.deepseek.com")),
-                            api_key=route.get("upstream_api_key", ""),
-                            api_format=route.get("upstream_api_format", "openai"),
-                        ),
-                        reasoning=ReasoningParams(
-                            enabled=bool(route.get("reasoning_type")),
-                            type=route.get("reasoning_type", "deepseek"),
-                            effort=route.get("reasoning_effort", "auto"),
-                            budget_tokens=route.get("reasoning_budget_tokens"),
-                            custom_params=route.get("reasoning_custom_params", {}),
-                            filter_thinking_tags=route.get("filter_thinking_tags", True) if route.get("filter_thinking_tags") is not None else True,
-                        ),
-                    )
-                    profiles.append(profile)
-                print(f"[MIGRATE] Migrated {len(profiles)} routes from model_routes.json")
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"[WARNING] Failed to migrate model_routes.json: {e}")
-
-        # Create default profile from environment variables
-        default_profile = Profile(
-            id="default",
-            name="Default",
-            model_patterns=["*"],
-            match_type="wildcard",
-            priority=-1,  # Lowest priority
-            enabled=True,
-            upstream=UpstreamConfig(
-                base_url=os.getenv("UPSTREAM_BASE_URL", "https://api.deepseek.com"),
-                api_key=os.getenv("UPSTREAM_API_KEY", ""),
-                api_format="openai",
-            ),
-            reasoning=ReasoningParams(
-                enabled=os.getenv("REASONING_ENABLED", "false").lower() == "true",
-                type=os.getenv("REASONING_TYPE", "deepseek"),
-                effort=os.getenv("REASONING_EFFORT", "auto"),
-                filter_thinking_tags=os.getenv("FILTER_THINKING_TAGS", "true").lower() == "true",
-            ),
-        )
-        profiles.append(default_profile)
-
-        # Load proxy settings from environment
-        self.proxy = ProxySettings(
-            port=int(os.getenv("PROXY_PORT", "5000")),
-            api_key=os.getenv("PROXY_API_KEY", ""),
-        )
-
-        self.profiles = profiles
-        self.profiles.sort(key=lambda p: p.priority, reverse=True)
         self.default_profile_id = "default"
         self._save()
 

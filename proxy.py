@@ -14,6 +14,9 @@ Features:
 import os
 import json
 import re
+import queue
+import threading
+from typing import List
 from functools import wraps
 from flask import Flask, request, Response, stream_with_context
 from flask_cors import CORS
@@ -30,7 +33,7 @@ CORS(app)
 # Get proxy settings from unified config manager
 PROXY_PORT = CONFIG_MANAGER.proxy.port
 
-# Legacy compatibility - get from default profile
+# Load defaults from current default profile
 _default_profile = CONFIG_MANAGER.get_default_profile()
 UPSTREAM_API_KEY = _default_profile.upstream.api_key if _default_profile else ""
 UPSTREAM_BASE_URL = _default_profile.upstream.base_url if _default_profile else "https://api.deepseek.com"
@@ -56,6 +59,22 @@ YELLOW = "\033[93m"
 RED = "\033[91m"
 RESET = "\033[0m"
 DIM = "\033[2m"
+
+
+# ===================== Thinking SSE Broadcast =====================
+
+_THINKING_SUBSCRIBERS: List[queue.Queue] = []
+_THINKING_LOCK = threading.Lock()
+
+
+def _broadcast_thinking(payload: dict) -> None:
+    data = json.dumps(payload, ensure_ascii=False)
+    with _THINKING_LOCK:
+        for q in list(_THINKING_SUBSCRIBERS):
+            try:
+                q.put_nowait(data)
+            except Exception:
+                pass
 
 
 def require_api_key(f):
@@ -103,6 +122,7 @@ class ThinkingPrinter:
 def print_thinking(content):
     """Print thinking content to console with colored output."""
     ThinkingPrinter.print(content)
+    _broadcast_thinking({"type": "thinking", "content": content})
 
 
 def get_default_params():
@@ -425,7 +445,7 @@ def process_sse_line(line, stream_filter):
         return None, ""
 
 
-def stream_response(upstream_response, api_format="openai", filter_thinking_tags=True):
+def stream_response(upstream_response, api_format="openai", filter_thinking_tags=True, model=None):
     """Generator that streams filtered response."""
     # Only create filter if filtering is enabled
     stream_filter = StreamFilter() if filter_thinking_tags else None
@@ -575,6 +595,7 @@ def stream_response(upstream_response, api_format="openai", filter_thinking_tags
         except Exception:
             pass
         ThinkingPrinter.end()
+        _broadcast_thinking({"type": "done", "model": model})
 
 
 def filter_non_stream_response(response_data):
@@ -708,7 +729,7 @@ def chat_completions():
         # Stream response with filtering
         filter_tags = effective_config.get("filter_thinking_tags", True)
         return Response(
-            stream_with_context(stream_response(upstream_response, api_format, filter_tags)),
+            stream_with_context(stream_response(upstream_response, api_format, filter_tags, model=model)),
             content_type="text/event-stream; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache",
@@ -735,7 +756,44 @@ def chat_completions():
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "upstream": UPSTREAM_BASE_URL}
+    profile = CONFIG_MANAGER.get_default_profile()
+    upstream = profile.upstream.base_url if profile else UPSTREAM_BASE_URL
+    return {"status": "healthy", "upstream": upstream}
+
+
+@app.route("/v1/thinking/stream", methods=["GET"])
+def thinking_stream():
+    """SSE stream for captured thinking content (for frontend ThinkingViewer)."""
+
+    def gen():
+        q = queue.Queue()
+        with _THINKING_LOCK:
+            _THINKING_SUBSCRIBERS.append(q)
+
+        try:
+            while True:
+                try:
+                    data = q.get(timeout=15)
+                    yield f"data: {data}\n\n"
+                except queue.Empty:
+                    # Keep-alive ping
+                    yield ": ping\n\n"
+        finally:
+            with _THINKING_LOCK:
+                try:
+                    _THINKING_SUBSCRIBERS.remove(q)
+                except ValueError:
+                    pass
+
+    return Response(
+        stream_with_context(gen()),
+        content_type="text/event-stream; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/v1/config/reasoning/types", methods=["GET"])
@@ -885,14 +943,19 @@ def import_config():
 @require_api_key
 def list_models():
     """Proxy models endpoint."""
-    # Get API key and base URL from headers or use defaults
-    # If proxy_api_key is set, the Authorization header is used for proxy auth,
-    # so we should use UPSTREAM_API_KEY for upstream calls
+    # Get upstream api_key/base_url from headers or from default profile.
+    # NOTE: When proxy api_key is enabled, request Authorization is used for proxy auth,
+    # so upstream auth must come from config.
+    default_profile = CONFIG_MANAGER.get_default_profile()
+    profile_api_key = default_profile.upstream.api_key if default_profile else UPSTREAM_API_KEY
+    profile_base_url = default_profile.upstream.base_url if default_profile else UPSTREAM_BASE_URL
+
+    base_url = request.headers.get("X-Upstream-Base-URL") or profile_base_url
+
     if CONFIG_MANAGER.proxy.api_key:
-        api_key = UPSTREAM_API_KEY
+        api_key = profile_api_key
     else:
-        api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
-    base_url = request.headers.get("X-Upstream-Base-URL") or UPSTREAM_BASE_URL
+        api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or profile_api_key
     
     headers = {"Authorization": f"Bearer {api_key}"}
     upstream_url = f"{base_url.rstrip('/')}/v1/models"

@@ -42,14 +42,12 @@ pip install -r requirements.txt
 ```bash
 # Windows
 copy proxy_config.example.json proxy_config.json
-copy model_routes.example.json model_routes.json
 
 # Linux/macOS
 cp proxy_config.example.json proxy_config.json
-cp model_routes.example.json model_routes.json
 ```
 
-然后编辑 `proxy_config.json`，填入您的 API 密钥和上游服务地址。
+然后编辑 `proxy_config.json`，填入您的上游服务地址与 API Key（支持按 Profile 配置不同上游/模型路由）。
 
 ### 3. 配置环境变量（可选）
 
@@ -149,10 +147,18 @@ droid config set api.baseUrl http://localhost:5000
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/v1/config/reasoning` | GET | 获取当前推理配置 |
 | `/v1/config/reasoning/types` | GET | 获取支持的推理类型和强度选项 |
 | `/v1/config/proxy` | GET | 获取代理配置 |
 | `/v1/config/proxy` | PUT | 更新代理配置 |
+| `/v1/config/profiles` | GET | 获取全部 Profiles |
+| `/v1/config/profiles` | POST | 创建 Profile |
+| `/v1/config/profiles/<profile_id>` | GET | 获取单个 Profile |
+| `/v1/config/profiles/<profile_id>` | PUT | 更新 Profile |
+| `/v1/config/profiles/<profile_id>` | DELETE | 删除 Profile |
+| `/v1/config/profiles/test` | POST | 测试模型名匹配结果 |
+| `/v1/config/default-profile` | PUT | 设置默认 Profile |
+| `/v1/config/export` | GET | 导出完整配置 |
+| `/v1/config/import` | POST | 导入配置（支持 merge/replace） |
 
 ## 使用示例
 
@@ -212,24 +218,22 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 | 类型 | 参数格式 | 适用模型 |
 |------|----------|----------|
-| `deepseek` | `thinking.type` | DeepSeek R1/V3.1 |
-| `openai` | `reasoning_effort` | OpenAI o1/o3/GPT-5 |
-| `anthropic` | `thinking.budget_tokens` | Claude 3.7/4 |
-| `gemini` | `thinkingConfig` | Gemini 2.5+ |
-| `qwen` | `enable_thinking` | Qwen3 |
-| `openrouter` | `reasoning.enabled` | OpenRouter |
-| `custom` | 自定义 JSON | 任意 |
+| `deepseek` | `thinking.type` | DeepSeek R1/V3.1；Zhipu GLM-4.5/4.6（glm-4.5*/glm-4.6*） |
+| `openai` | `reasoning_effort` | OpenAI o1/o3/GPT-5（含 GPT-5.1 Codex 等） |
+| `anthropic` | `thinking.type` + `thinking.budget_tokens` | Claude 3.7/4（含 Claude 4/Opus 4.5 等） |
+| `gemini` | `thinkingConfig.includeThoughts` + `thinkingConfig.thinkingBudget` | Gemini 2.5+（含 Gemini 3 系列） |
+| `qwen` | `enable_thinking` + `thinking_budget` | Qwen3 |
+| `openrouter` | `reasoning.enabled` + `reasoning.effort` | OpenRouter |
+| `custom` | 自定义 JSON（Profile 的 `reasoning.custom_params`） | 任意 |
 
 ## 项目结构
 
 ```
 droid-byok-unleashed/
 ├── proxy.py              # 主代理服务
-├── proxy_config.py       # 代理配置管理
+├── config_manager.py     # Profile/Proxy 配置管理（当前主配置）
 ├── proxy_config.json     # 持久化配置文件（不提交到 Git）
 ├── proxy_config.example.json  # 配置文件模板
-├── model_routes.json     # 模型路由配置（不提交到 Git）
-├── model_routes.example.json  # 路由配置模板
 ├── reasoning_config.py   # 推理模型配置
 ├── reasoning_builder.py  # 推理参数构建器
 ├── api_format_adapter.py # API 格式适配器
@@ -237,6 +241,7 @@ droid-byok-unleashed/
 ├── .env.example          # 环境变量示例
 ├── test_filter.py        # StreamFilter 单元测试
 ├── test_params.py        # LLM 参数处理单元测试
+├── test_proxy.py         # 端到端脚本（手动运行，需先启动服务）
 └── frontend/             # React 前端
     ├── src/
     │   ├── components/   # UI 组件
@@ -249,11 +254,11 @@ droid-byok-unleashed/
 ## 运行测试
 
 ```bash
-# 运行 StreamFilter 测试
-python test_filter.py
+# 推荐：pytest
+python -m pytest -q
 
-# 运行 LLM 参数处理测试
-python test_params.py
+# 手动端到端测试（需先启动 python proxy.py）
+python test_proxy.py
 ```
 
 ## 技术栈
@@ -264,7 +269,7 @@ python test_params.py
 - Requests
 
 ### 前端
-- React 18 + TypeScript
+- React 19 + TypeScript
 - Vite
 - Tailwind CSS
 - Lucide Icons
