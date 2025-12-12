@@ -103,6 +103,8 @@ class ReasoningParamsBuilder:
             ratio = EFFORT_RATIO.get(self.config.effort, 0.5)
             if ratio <= 1:
                 params["thinking"]["budget_tokens"] = int(base_tokens * ratio)
+            else:
+                params["thinking"]["budget_tokens"] = base_tokens
 
         return params
 

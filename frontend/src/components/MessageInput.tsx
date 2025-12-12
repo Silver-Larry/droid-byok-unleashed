@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import type * as React from 'react';
 import { Send } from 'lucide-react';
 import { Button } from './ui/button';
 

@@ -3,6 +3,16 @@ Droid BYOK Proxy 端到端测试脚本
 测试代理服务的连通性和功能
 """
 
+# NOTE: This is an end-to-end script intended to be run manually while the server is running.
+# Prevent pytest from collecting it as a unit test module.
+if __name__ != "__main__":
+    try:
+        import pytest  # type: ignore
+
+        pytest.skip("E2E script (run manually): python test_proxy.py", allow_module_level=True)
+    except Exception:
+        pass
+
 import requests
 import json
 import sys
@@ -35,7 +45,7 @@ def test_config():
         data = r.json()
         success = r.status_code == 200
         print_result("Get Proxy Config", success, 
-                    f"port={data.get('proxy_port')}, url={data.get('upstream_base_url')}, format={data.get('upstream_api_format')}")
+                    f"port={data.get('port')}, api_key={data.get('api_key')}")
         return success
     except Exception as e:
         print_result("Get Proxy Config", False, str(e))

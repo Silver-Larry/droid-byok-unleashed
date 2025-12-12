@@ -7,13 +7,13 @@ export interface Message {
 }
 
 export interface LLMParams {
-  temperature?: number;
-  top_p?: number;
-  top_k?: number;
-  max_tokens?: number;
-  presence_penalty?: number;
-  frequency_penalty?: number;
-  seed?: number;
+  temperature?: number | null;
+  top_p?: number | null;
+  top_k?: number | null;
+  max_tokens?: number | null;
+  presence_penalty?: number | null;
+  frequency_penalty?: number | null;
+  seed?: number | null;
   stop?: string[];
 }
 
@@ -129,4 +129,73 @@ export interface ThinkingContent {
   content: string;
   timestamp: Date;
   model?: string;
+}
+
+// Match types for model patterns
+export type MatchType = 'exact' | 'wildcard' | 'regex';
+
+// Upstream configuration
+export interface UpstreamConfig {
+  base_url: string;
+  api_key: string;
+  api_format: ApiFormatType;
+}
+
+// LLM parameters for Profile (reuses LLMParams defined above)
+
+// Reasoning parameters
+export interface ReasoningParams {
+  enabled: boolean;
+  type: ReasoningType;
+  effort: ReasoningEffort;
+  budget_tokens?: number | null;
+  custom_params?: Record<string, unknown>;
+  filter_thinking_tags: boolean;
+}
+
+// Unified Profile Configuration
+export interface Profile {
+  id: string;
+  name: string;
+  model_patterns: string[];
+  match_type: MatchType;
+  priority: number;
+  enabled: boolean;
+  upstream: UpstreamConfig;
+  llm_params: LLMParams;
+  reasoning: ReasoningParams;
+  created_at: string;
+  updated_at: string;
+}
+
+// API Response types
+export interface ProfilesResponse {
+  profiles: Profile[];
+  default_profile: string;
+}
+
+export interface ProfileTestResult {
+  model: string;
+  matched: Profile | null;
+  all_matches: {
+    id: string;
+    name: string;
+    patterns: string[];
+    match_type: MatchType;
+    priority: number;
+    enabled: boolean;
+  }[];
+}
+
+// Proxy settings
+export interface ProxySettings {
+  port: number;
+  api_key: string;
+}
+
+// Export/Import config
+export interface ExportedConfig {
+  proxy: ProxySettings;
+  profiles: Profile[];
+  default_profile: string;
 }

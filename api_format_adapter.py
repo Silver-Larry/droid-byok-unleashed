@@ -23,7 +23,7 @@ class ApiFormatAdapter(ABC):
         pass
     
     @abstractmethod
-    def get_endpoint(self, base_url: str) -> str:
+    def get_endpoint(self, base_url: str, model: Optional[str] = None, stream: bool = False) -> str:
         """Get the API endpoint for this format"""
         pass
     
@@ -42,7 +42,7 @@ class OpenAIAdapter(ApiFormatAdapter):
     def transform_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         return response
     
-    def get_endpoint(self, base_url: str) -> str:
+    def get_endpoint(self, base_url: str, model: Optional[str] = None, stream: bool = False) -> str:
         base_url = base_url.rstrip('/')
         # If base_url ends with version path (e.g., /v4, /v1), skip adding /v1
         if base_url.endswith(('/v1', '/v2', '/v3', '/v4', '/v5')):
@@ -86,7 +86,7 @@ class OpenAIResponseAdapter(ApiFormatAdapter):
             }
         return response
     
-    def get_endpoint(self, base_url: str) -> str:
+    def get_endpoint(self, base_url: str, model: Optional[str] = None, stream: bool = False) -> str:
         return f"{base_url.rstrip('/')}/v1/responses"
     
     def get_headers(self, api_key: str) -> Dict[str, str]:
@@ -143,6 +143,10 @@ class AnthropicAdapter(ApiFormatAdapter):
             transformed["stream"] = body["stream"]
         if "stop" in body:
             transformed["stop_sequences"] = body["stop"]
+
+        # Pass through reasoning/thinking params when present
+        if "thinking" in body:
+            transformed["thinking"] = body["thinking"]
         
         return transformed
     
@@ -184,7 +188,7 @@ class AnthropicAdapter(ApiFormatAdapter):
         }
         return mapping.get(reason, "stop")
     
-    def get_endpoint(self, base_url: str) -> str:
+    def get_endpoint(self, base_url: str, model: Optional[str] = None, stream: bool = False) -> str:
         if "anthropic.com" in base_url:
             return "https://api.anthropic.com/v1/messages"
         return f"{base_url.rstrip('/')}/v1/messages"
@@ -243,6 +247,10 @@ class GeminiAdapter(ApiFormatAdapter):
         
         if generation_config:
             transformed["generationConfig"] = generation_config
+
+        # Pass through reasoning/thinking params when present
+        if "thinkingConfig" in body:
+            transformed["thinkingConfig"] = body["thinkingConfig"]
         
         return transformed
     
@@ -281,9 +289,12 @@ class GeminiAdapter(ApiFormatAdapter):
             }
         }
     
-    def get_endpoint(self, base_url: str) -> str:
-        # Gemini uses a different URL structure
-        return f"{base_url.rstrip('/')}/v1beta/models/gemini-pro:generateContent"
+    def get_endpoint(self, base_url: str, model: Optional[str] = None, stream: bool = False) -> str:
+        # Gemini uses a model-in-path URL structure.
+        # Non-stream: :generateContent, Stream: :streamGenerateContent
+        model_name = (model or "gemini-pro").strip() or "gemini-pro"
+        method = "streamGenerateContent" if stream else "generateContent"
+        return f"{base_url.rstrip('/')}/v1beta/models/{model_name}:{method}"
     
     def get_headers(self, api_key: str) -> Dict[str, str]:
         return {
@@ -305,7 +316,7 @@ class AzureOpenAIAdapter(ApiFormatAdapter):
     def transform_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         return response
     
-    def get_endpoint(self, base_url: str) -> str:
+    def get_endpoint(self, base_url: str, model: Optional[str] = None, stream: bool = False) -> str:
         # Azure uses deployment-based URLs
         # Format: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions
         return f"{base_url.rstrip('/')}/chat/completions?api-version={self.api_version}"

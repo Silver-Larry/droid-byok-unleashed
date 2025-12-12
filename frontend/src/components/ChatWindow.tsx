@@ -1,33 +1,31 @@
 import { useState } from 'react';
-import { Terminal, Sun, Moon, Settings, Brain, Github } from 'lucide-react';
+import { Terminal, Sun, Moon, Brain, Github, Layers } from 'lucide-react';
 import { Toaster } from 'sonner';
-import { useConfig } from '../hooks/useConfig';
 import { useTheme } from '../hooks/useTheme';
 import { StatusBar } from './StatusBar';
-import { SettingsPanel } from './SettingsPanel';
 import { ThinkingViewer } from './ThinkingViewer';
+import { ProfileManager } from './ProfileManager';
 import { cn } from '../lib/utils';
 
-type Tab = 'thinking';
+type Tab = 'thinking' | 'profiles';
 
 const tabs: { id: Tab; label: string; icon: typeof Brain }[] = [
   { id: 'thinking', label: 'THINKING', icon: Brain },
+  { id: 'profiles', label: 'PROFILES', icon: Layers },
 ];
 
 export function ChatWindow() {
-  const [showSettings, setShowSettings] = useState(false);
-  const [activeTab, setActiveTab] = useState<Tab>('thinking');
-  const { config, updateConfig } = useConfig();
+  const [activeTab, setActiveTab] = useState<Tab>('profiles');
   const { theme, toggleTheme } = useTheme();
 
   const sidebarNav = (
     <nav className="w-12 shrink-0 border-r border-border bg-card flex flex-col items-center pt-2">
       {tabs.map(({ id, label, icon: Icon }) => {
-        const isActive = activeTab === id && !showSettings;
+        const isActive = activeTab === id;
         return (
           <button
             key={id}
-            onClick={() => { setActiveTab(id); setShowSettings(false); }}
+            onClick={() => setActiveTab(id)}
             className={cn(
               "relative w-12 h-12 flex items-center justify-center transition-colors cursor-pointer outline-none",
               isActive
@@ -43,23 +41,6 @@ export function ChatWindow() {
           </button>
         );
       })}
-      <div className="mt-auto mb-2">
-        <button
-          onClick={() => setShowSettings(!showSettings)}
-          className={cn(
-            "relative w-12 h-12 flex items-center justify-center transition-colors cursor-pointer outline-none",
-            showSettings
-              ? "text-primary"
-              : "text-primary/40 hover:text-primary/70 dark:text-[#858585] dark:hover:text-primary/70"
-          )}
-          title="Settings"
-        >
-          {showSettings && (
-            <span className="absolute inset-1.5 bg-[#DDDDE2] dark:bg-primary/20" style={{ borderRadius: '0px' }} />
-          )}
-          <Settings className="w-5 h-5 relative z-10" strokeWidth={1.5} />
-        </button>
-      </div>
     </nav>
   );
 
@@ -88,12 +69,10 @@ export function ChatWindow() {
             </div>
           </header>
 
-          {showSettings ? (
-            <SettingsPanel
-              config={config}
-              onUpdate={updateConfig}
-              onClose={() => setShowSettings(false)}
-            />
+          {activeTab === 'profiles' ? (
+            <main className="flex-1 overflow-auto">
+              <ProfileManager />
+            </main>
           ) : (
             <ThinkingViewer className="flex-1" />
           )}

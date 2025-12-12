@@ -7,7 +7,7 @@ Features:
 - Reasoning model parameter injection (DeepSeek, OpenAI, Anthropic, etc.)
 - Stream filtering to remove <think>...</think> blocks
 - Colored console output for thinking process visualization
-- Flexible LLM parameter configuration via environment variables
+- Profile-based configuration with model pattern matching
 - Configurable proxy port and API key authentication
 """
 
@@ -19,24 +19,21 @@ from flask import Flask, request, Response, stream_with_context
 from flask_cors import CORS
 import requests
 
-from reasoning_config import ReasoningConfig, get_reasoning_types_info
-from reasoning_builder import build_reasoning_params
-from proxy_config import ProxyConfig
+from reasoning_config import ReasoningConfig, ReasoningType, ReasoningEffort, get_reasoning_types_info
+from reasoning_builder import build_reasoning_params, ReasoningParamsBuilder
 from api_format_adapter import get_adapter, transform_stream_chunk
+from config_manager import CONFIG_MANAGER, REASONING_TYPES, REASONING_EFFORTS, API_FORMAT_TYPES
 
 app = Flask(__name__)
 CORS(app)
 
-# Load proxy configuration
-PROXY_CONFIG = ProxyConfig.load()
+# Get proxy settings from unified config manager
+PROXY_PORT = CONFIG_MANAGER.proxy.port
 
-# Legacy compatibility - use PROXY_CONFIG values
-UPSTREAM_API_KEY = PROXY_CONFIG.upstream_api_key
-UPSTREAM_BASE_URL = PROXY_CONFIG.upstream_base_url
-PROXY_PORT = PROXY_CONFIG.proxy_port
-
-# Load reasoning configuration
-REASONING_CONFIG = ReasoningConfig.from_env()
+# Legacy compatibility - get from default profile
+_default_profile = CONFIG_MANAGER.get_default_profile()
+UPSTREAM_API_KEY = _default_profile.upstream.api_key if _default_profile else ""
+UPSTREAM_BASE_URL = _default_profile.upstream.base_url if _default_profile else "https://api.deepseek.com"
 
 # LLM Parameter Configuration
 # Defines supported parameters with their types and valid ranges
@@ -69,13 +66,13 @@ def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         # 如果未设置 API Key，跳过验证
-        if not PROXY_CONFIG.proxy_api_key:
+        if not CONFIG_MANAGER.proxy.api_key:
             return f(*args, **kwargs)
         
         auth_header = request.headers.get("Authorization", "")
         provided_key = auth_header.replace("Bearer ", "")
         
-        if provided_key != PROXY_CONFIG.proxy_api_key:
+        if provided_key != CONFIG_MANAGER.proxy.api_key:
             print(f"{RED}[AUTH]{RESET} Invalid API key from {request.remote_addr}")
             return {"error": "Invalid or missing API key"}, 401
         
@@ -129,24 +126,24 @@ def get_default_params():
 def validate_param(name, value, config):
     """
     Validate parameter value against its configuration.
-    Returns (is_valid, warning_message).
+    Returns (is_valid, warning_message, coerced_value).
     """
     if value is None:
-        return True, None
+        return True, None, None
     
     param_type = config.get("type")
     if param_type and not isinstance(value, param_type):
         try:
             value = param_type(value)
         except (ValueError, TypeError):
-            return False, f"Parameter {name} should be of type {param_type.__name__}"
+            return False, f"Parameter {name} should be of type {param_type.__name__}", None
     
     if "range" in config:
         min_val, max_val = config["range"]
         if not (min_val <= value <= max_val):
-            return False, f"Parameter {name}={value} out of range [{min_val}, {max_val}]"
+            return False, f"Parameter {name}={value} out of range [{min_val}, {max_val}]", None
     
-    return True, None
+    return True, None, value
 
 
 def merge_params(body, defaults):
@@ -176,9 +173,12 @@ def sanitize_params(body):
                 params_to_remove.append(param)
                 continue
             
-            is_valid, warning = validate_param(param, value, config)
+            is_valid, warning, coerced_value = validate_param(param, value, config)
+            if is_valid and coerced_value is not None:
+                body[param] = coerced_value
             if not is_valid:
                 print(f"{YELLOW}[WARNING]{RESET} {warning}")
+                params_to_remove.append(param)
     
     for param in params_to_remove:
         del body[param]
@@ -186,7 +186,7 @@ def sanitize_params(body):
     return body
 
 
-def inject_inference_params(body):
+def inject_inference_params(body, effective_config=None):
     """
     Inject and process inference parameters.
     
@@ -194,7 +194,7 @@ def inject_inference_params(body):
     1. Loads default parameters from environment variables
     2. Merges defaults with request parameters (request takes precedence)
     3. Validates and sanitizes all parameters
-    4. Injects reasoning parameters if enabled
+    4. Injects reasoning parameters based on effective config from profile
     
     Supported parameters:
     - temperature: Controls randomness (0-2)
@@ -206,7 +206,7 @@ def inject_inference_params(body):
     - seed: Random seed for reproducibility
     - stop: Stop sequences (list of strings)
     
-    Reasoning parameters (when REASONING_ENABLED=true):
+    Reasoning parameters (when enabled):
     - DeepSeek: thinking.type
     - OpenAI: reasoning_effort
     - Anthropic: thinking.budget_tokens
@@ -218,12 +218,46 @@ def inject_inference_params(body):
     body = merge_params(body, defaults)
     body = sanitize_params(body)
     
-    # Inject reasoning parameters if enabled
-    if REASONING_CONFIG.enabled:
-        reasoning_params = build_reasoning_params(REASONING_CONFIG)
-        if reasoning_params:
-            body.update(reasoning_params)
-            print(f"{YELLOW}[REASONING]{RESET} Injected: {json.dumps(reasoning_params)}")
+    # Merge LLM params from profile
+    if effective_config:
+        llm_params = effective_config.get("llm_params", {})
+        for param, value in llm_params.items():
+            if param not in body and value is not None:
+                body[param] = value
+    
+    # Use effective config for reasoning parameters
+    if effective_config:
+        reasoning_enabled = effective_config.get("reasoning_enabled", False)
+        reasoning_type_str = effective_config.get("reasoning_type", "deepseek")
+        reasoning_effort_str = effective_config.get("reasoning_effort", "auto")
+        budget_tokens = effective_config.get("reasoning_budget_tokens")
+        custom_params = effective_config.get("reasoning_custom_params", {})
+        
+        if reasoning_enabled:
+            # Build reasoning config from effective config
+            try:
+                reasoning_type = ReasoningType(reasoning_type_str)
+            except ValueError:
+                reasoning_type = ReasoningType.DEEPSEEK
+            
+            try:
+                effort = ReasoningEffort(reasoning_effort_str)
+            except ValueError:
+                effort = ReasoningEffort.AUTO
+            
+            temp_config = ReasoningConfig(
+                enabled=True,
+                reasoning_type=reasoning_type,
+                effort=effort,
+                budget_tokens=budget_tokens,
+                custom_params=custom_params or {},
+                filter_thinking_tags=effective_config.get("filter_thinking_tags", True),
+            )
+            reasoning_params = build_reasoning_params(temp_config)
+            if reasoning_params:
+                body.update(reasoning_params)
+                profile_name = effective_config.get("profile_name", "default")
+                print(f"{YELLOW}[REASONING]{RESET} [{profile_name}] Injected: {json.dumps(reasoning_params)}")
     
     # Inject thinking parameter for Zhipu GLM models (official API format)
     # Format: thinking: { type: "enabled" | "disabled" }
@@ -343,18 +377,7 @@ def process_sse_line(line, stream_filter):
     data_str = line[6:]  # Remove "data: " prefix
     
     if data_str.strip() == "[DONE]":
-        # Flush remaining buffer
-        remaining, thinking = stream_filter.flush()
-        if remaining:
-            # Create a final chunk with remaining content
-            final_chunk = {
-                "choices": [{
-                    "delta": {"content": remaining},
-                    "index": 0
-                }]
-            }
-            return f"data: {json.dumps(final_chunk)}", thinking
-        return line, thinking
+        return line, ""
     
     try:
         data = json.loads(data_str)
@@ -402,60 +425,16 @@ def process_sse_line(line, stream_filter):
         return None, ""
 
 
-def stream_response(upstream_response, api_format="openai"):
+def stream_response(upstream_response, api_format="openai", filter_thinking_tags=True):
     """Generator that streams filtered response."""
     # Only create filter if filtering is enabled
-    stream_filter = StreamFilter() if REASONING_CONFIG.filter_thinking_tags else None
+    stream_filter = StreamFilter() if filter_thinking_tags else None
     line_buffer = ""
-    
-    # Use iter_lines with proper UTF-8 decoding to avoid encoding issues
-    # iter_content with decode_unicode=True can cause issues when charset is not properly set
-    for chunk in upstream_response.iter_content(chunk_size=None):
-        if not chunk:
-            continue
-        # Explicitly decode as UTF-8
-        chunk = chunk.decode('utf-8', errors='replace')
-        if not chunk:
-            continue
-        
-        line_buffer += chunk
-        
-        while "\n" in line_buffer:
-            line, line_buffer = line_buffer.split("\n", 1)
-            line = line.strip()
-            
-            if not line:
-                yield "\n"
-                continue
-            
-            # If filtering is disabled, pass through directly
-            if stream_filter is None:
-                yield line + "\n"
-                continue
-            
-            modified_line, thinking = process_sse_line(line, stream_filter)
-            
-            # Print thinking content to console
-            if thinking:
-                print_thinking(thinking)
-            
-            # Forward filtered content
-            if modified_line:
-                yield modified_line + "\n"
-    
-    # Process any remaining content in buffer
-    if line_buffer.strip():
+    done_sent = False
+
+    def _emit_final_flush():
         if stream_filter is None:
-            yield line_buffer.strip() + "\n"
-        else:
-            modified_line, thinking = process_sse_line(line_buffer.strip(), stream_filter)
-            if thinking:
-                print_thinking(thinking)
-            if modified_line:
-                yield modified_line + "\n"
-    
-    # Final flush (only if filtering is enabled)
-    if stream_filter is not None:
+            return
         remaining, thinking = stream_filter.flush()
         if thinking:
             print_thinking(thinking)
@@ -467,9 +446,134 @@ def stream_response(upstream_response, api_format="openai"):
                     "finish_reason": None
                 }]
             }
-            yield f"data: {json.dumps(final_chunk)}\n"
-        
-        # End thinking output
+            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n"
+
+    def _emit_done():
+        yield "data: [DONE]\n"
+    
+    # Use iter_lines with proper UTF-8 decoding to avoid encoding issues
+    # iter_content with decode_unicode=True can cause issues when charset is not properly set
+    try:
+        for chunk in upstream_response.iter_content(chunk_size=None):
+            if not chunk:
+                continue
+            chunk = chunk.decode('utf-8', errors='replace')
+            if not chunk:
+                continue
+
+            line_buffer += chunk
+
+            while "\n" in line_buffer:
+                line, line_buffer = line_buffer.split("\n", 1)
+                line = line.strip()
+
+                if not line:
+                    yield "\n"
+                    continue
+
+                # OpenAI/Azure: upstream is already OpenAI-compatible SSE
+                if api_format in ("openai", "azure-openai"):
+                    if stream_filter is None:
+                        yield line + "\n"
+                        if line.startswith("data: ") and line[6:].strip() == "[DONE]":
+                            done_sent = True
+                            return
+                        continue
+
+                    if line.startswith("data: ") and line[6:].strip() == "[DONE]":
+                        yield from _emit_final_flush()
+                        yield from _emit_done()
+                        done_sent = True
+                        return
+
+                    modified_line, thinking = process_sse_line(line, stream_filter)
+                    if thinking:
+                        print_thinking(thinking)
+                    if modified_line:
+                        yield modified_line + "\n"
+                    continue
+
+                # Other providers: transform upstream streaming chunks into OpenAI-compatible SSE
+                if not line.startswith("data: "):
+                    continue
+
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    yield from _emit_final_flush()
+                    yield from _emit_done()
+                    done_sent = True
+                    return
+
+                try:
+                    upstream_chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                openai_chunk = transform_stream_chunk(upstream_chunk, api_format)
+                if openai_chunk is None:
+                    continue
+
+                openai_line = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}"
+
+                if stream_filter is None:
+                    yield openai_line + "\n"
+                    continue
+
+                modified_line, thinking = process_sse_line(openai_line, stream_filter)
+                if thinking:
+                    print_thinking(thinking)
+                if modified_line:
+                    yield modified_line + "\n"
+
+        # Process any remaining content in buffer
+        if line_buffer.strip():
+            line = line_buffer.strip()
+            if api_format in ("openai", "azure-openai"):
+                if stream_filter is None:
+                    yield line + "\n"
+                else:
+                    if line.startswith("data: ") and line[6:].strip() == "[DONE]":
+                        yield from _emit_final_flush()
+                        yield from _emit_done()
+                        done_sent = True
+                    else:
+                        modified_line, thinking = process_sse_line(line, stream_filter)
+                        if thinking:
+                            print_thinking(thinking)
+                        if modified_line:
+                            yield modified_line + "\n"
+            else:
+                if line.startswith("data: "):
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        yield from _emit_final_flush()
+                        yield from _emit_done()
+                        done_sent = True
+                    else:
+                        try:
+                            upstream_chunk = json.loads(data_str)
+                            openai_chunk = transform_stream_chunk(upstream_chunk, api_format)
+                        except json.JSONDecodeError:
+                            openai_chunk = None
+                        if openai_chunk is not None:
+                            openai_line = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}"
+                            if stream_filter is None:
+                                yield openai_line + "\n"
+                            else:
+                                modified_line, thinking = process_sse_line(openai_line, stream_filter)
+                                if thinking:
+                                    print_thinking(thinking)
+                                if modified_line:
+                                    yield modified_line + "\n"
+
+        if not done_sent:
+            yield from _emit_final_flush()
+            yield from _emit_done()
+    finally:
+        try:
+            upstream_response.close()
+        except Exception:
+            pass
         ThinkingPrinter.end()
 
 
@@ -520,37 +624,52 @@ def filter_non_stream_response(response_data):
 def chat_completions():
     """Handle chat completion requests."""
     # Get request body
-    body = request.get_json()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return {"error": "Invalid or missing JSON body"}, 400
+    model = body.get("model", "") or ""
+
+    messages = body.get("messages", [])
+    if messages is None:
+        messages = []
+    if not isinstance(messages, list):
+        return {"error": "messages must be a list"}, 400
+    body["messages"] = messages
+
     original_keys = list(body.keys())
     original_thinking = body.get('thinking')
     original_reasoning_effort = body.get('reasoning_effort')
     
     # Log incoming request for debugging
-    print(f"\n{CYAN}[REQUEST]{RESET} Model: {body.get('model')}, Stream: {body.get('stream')}")
+    print(f"\n{CYAN}[REQUEST]{RESET} Model: {model}, Stream: {body.get('stream')}")
     print(f"{CYAN}[REQUEST]{RESET} Messages: {len(body.get('messages', []))} items")
+    
+    # Get effective config based on profile matching
+    effective_config = CONFIG_MANAGER.get_effective_config(model)
+    profile_name = effective_config.get("profile_name")
+    if profile_name:
+        print(f"{YELLOW}[PROFILE]{RESET} Matched profile: {profile_name}")
     
     # Debug: print original request params (before injection)
     print(f"{CYAN}[DEBUG ORIGINAL]{RESET} Keys: {original_keys}")
     print(f"{CYAN}[DEBUG ORIGINAL]{RESET} thinking: {original_thinking}, reasoning_effort: {original_reasoning_effort}")
     
-    # Inject inference parameters
-    body = inject_inference_params(body)
+    # Inject inference parameters with effective config
+    body = inject_inference_params(body, effective_config)
     
     # Debug: print final request params (after injection)
     print(f"{CYAN}[DEBUG FINAL]{RESET} Keys: {list(body.keys())}")
     print(f"{CYAN}[DEBUG FINAL]{RESET} thinking: {body.get('thinking')}")
     
-    # Get API key and base URL from headers or use defaults
-    # If proxy_api_key is set, the Authorization header is used for proxy auth,
-    # so we should use UPSTREAM_API_KEY for upstream calls
-    if PROXY_CONFIG.proxy_api_key:
-        api_key = UPSTREAM_API_KEY
+    # Get API key and base URL from effective config
+    if CONFIG_MANAGER.proxy.api_key:
+        api_key = effective_config.get("upstream_api_key") or UPSTREAM_API_KEY
     else:
-        api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
-    base_url = request.headers.get("X-Upstream-Base-URL") or UPSTREAM_BASE_URL
+        api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or effective_config.get("upstream_api_key") or UPSTREAM_API_KEY
+    base_url = request.headers.get("X-Upstream-Base-URL") or effective_config.get("upstream_base_url") or UPSTREAM_BASE_URL
     
-    # Get API format from header or config
-    api_format = request.headers.get("X-API-Format") or PROXY_CONFIG.upstream_api_format or "openai"
+    # Get API format from header or effective config
+    api_format = request.headers.get("X-API-Format") or effective_config.get("upstream_api_format") or "openai"
     
     # Get the appropriate adapter for the API format
     adapter = get_adapter(api_format)
@@ -562,8 +681,8 @@ def chat_completions():
     headers = adapter.get_headers(api_key)
     
     # Get the endpoint for the target API format
-    upstream_url = adapter.get_endpoint(base_url)
     is_stream = body.get("stream", False)
+    upstream_url = adapter.get_endpoint(base_url, model=model, stream=is_stream)
     
     print(f"\n{YELLOW}[PROXY]{RESET} Forwarding request to {upstream_url}")
     print(f"{YELLOW}[PROXY]{RESET} Stream mode: {is_stream}, API format: {api_format}")
@@ -587,8 +706,9 @@ def chat_completions():
     
     if is_stream:
         # Stream response with filtering
+        filter_tags = effective_config.get("filter_thinking_tags", True)
         return Response(
-            stream_with_context(stream_response(upstream_response, api_format)),
+            stream_with_context(stream_response(upstream_response, api_format, filter_tags)),
             content_type="text/event-stream; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache",
@@ -598,7 +718,14 @@ def chat_completions():
         )
     else:
         # Non-streaming response
-        response_data = upstream_response.json()
+        try:
+            response_data = upstream_response.json()
+        except ValueError:
+            return {
+                "error": "Upstream returned non-JSON response",
+                "upstream_status": upstream_response.status_code,
+                "upstream_body": upstream_response.text[:500],
+            }, 502
         # Transform response to OpenAI format if needed
         transformed_response = adapter.transform_response(response_data)
         filtered_data = filter_non_stream_response(transformed_response)
@@ -611,12 +738,6 @@ def health_check():
     return {"status": "healthy", "upstream": UPSTREAM_BASE_URL}
 
 
-@app.route("/v1/config/reasoning", methods=["GET"])
-def get_reasoning_config():
-    """Get current reasoning configuration (for frontend)."""
-    return REASONING_CONFIG.to_dict()
-
-
 @app.route("/v1/config/reasoning/types", methods=["GET"])
 def get_reasoning_types():
     """Get supported reasoning types and effort levels (for frontend dropdown)."""
@@ -626,7 +747,7 @@ def get_reasoning_types():
 @app.route("/v1/config/proxy", methods=["GET"])
 def get_proxy_config():
     """Get current proxy configuration (for frontend)."""
-    return PROXY_CONFIG.to_dict(hide_secrets=True)
+    return CONFIG_MANAGER.proxy.to_dict(hide_secrets=True)
 
 
 @app.route("/v1/config/proxy", methods=["PUT"])
@@ -636,7 +757,7 @@ def update_proxy_config():
     if not data:
         return {"error": "No data provided"}, 400
     
-    result = PROXY_CONFIG.update(**data)
+    result = CONFIG_MANAGER.update_proxy_settings(data)
     
     if not result.get("success"):
         return {"error": result.get("error", "Unknown error")}, 400
@@ -650,6 +771,116 @@ def update_proxy_config():
     return result
 
 
+# ============== Profile API ==============
+
+@app.route("/v1/config/profiles", methods=["GET"])
+def get_profiles():
+    """Get all configuration profiles."""
+    return {
+        "profiles": CONFIG_MANAGER.get_all_profiles(),
+        "default_profile": CONFIG_MANAGER.default_profile_id,
+    }
+
+
+@app.route("/v1/config/profiles", methods=["POST"])
+def create_profile():
+    """Create a new configuration profile."""
+    data = request.get_json()
+    if not data:
+        return {"error": "No data provided"}, 400
+    
+    result = CONFIG_MANAGER.create_profile(data)
+    if not result.get("success"):
+        return {"error": result.get("error", "Unknown error")}, 400
+    
+    print(f"{YELLOW}[PROFILE]{RESET} Created profile: {data.get('name')}")
+    return result
+
+
+@app.route("/v1/config/profiles/<profile_id>", methods=["GET"])
+def get_profile(profile_id):
+    """Get a specific configuration profile."""
+    profile = CONFIG_MANAGER.get_profile(profile_id)
+    if not profile:
+        return {"error": "Profile not found"}, 404
+    return {"profile": profile.to_dict()}
+
+
+@app.route("/v1/config/profiles/<profile_id>", methods=["PUT"])
+def update_profile(profile_id):
+    """Update a configuration profile."""
+    data = request.get_json()
+    if not data:
+        return {"error": "No data provided"}, 400
+    
+    result = CONFIG_MANAGER.update_profile(profile_id, data)
+    if not result.get("success"):
+        return {"error": result.get("error", "Unknown error")}, 400
+    
+    print(f"{YELLOW}[PROFILE]{RESET} Updated profile: {profile_id}")
+    return result
+
+
+@app.route("/v1/config/profiles/<profile_id>", methods=["DELETE"])
+def delete_profile(profile_id):
+    """Delete a configuration profile."""
+    result = CONFIG_MANAGER.delete_profile(profile_id)
+    if not result.get("success"):
+        return {"error": result.get("error", "Unknown error")}, 400
+    
+    print(f"{YELLOW}[PROFILE]{RESET} Deleted profile: {profile_id}")
+    return result
+
+
+@app.route("/v1/config/profiles/test", methods=["POST"])
+def test_profile_match():
+    """Test model name matching against profiles."""
+    data = request.get_json()
+    if not data or "model" not in data:
+        return {"error": "Model name is required"}, 400
+    
+    result = CONFIG_MANAGER.test_match(data["model"])
+    return result
+
+
+@app.route("/v1/config/default-profile", methods=["PUT"])
+def set_default_profile():
+    """Set the default profile."""
+    data = request.get_json()
+    if not data or "profile_id" not in data:
+        return {"error": "profile_id is required"}, 400
+    
+    result = CONFIG_MANAGER.set_default_profile(data["profile_id"])
+    if not result.get("success"):
+        return {"error": result.get("error", "Unknown error")}, 400
+    
+    print(f"{YELLOW}[PROFILE]{RESET} Default profile set to: {data['profile_id']}")
+    return result
+
+
+@app.route("/v1/config/export", methods=["GET"])
+def export_config():
+    """Export full configuration."""
+    return CONFIG_MANAGER.export_config()
+
+
+@app.route("/v1/config/import", methods=["POST"])
+def import_config():
+    """Import configuration."""
+    data = request.get_json()
+    if not data:
+        return {"error": "No data provided"}, 400
+    
+    merge = request.args.get("merge", "true").lower() == "true"
+    result = CONFIG_MANAGER.import_config(data, merge=merge)
+    
+    if not result.get("success"):
+        return {"error": result.get("error", "Unknown error")}, 400
+    
+    print(f"{YELLOW}[CONFIG]{RESET} Imported {result.get('profiles_count', 0)} profiles")
+    return result
+
+
 @app.route("/v1/models", methods=["GET"])
 @require_api_key
 def list_models():
@@ -657,7 +888,7 @@ def list_models():
     # Get API key and base URL from headers or use defaults
     # If proxy_api_key is set, the Authorization header is used for proxy auth,
     # so we should use UPSTREAM_API_KEY for upstream calls
-    if PROXY_CONFIG.proxy_api_key:
+    if CONFIG_MANAGER.proxy.api_key:
         api_key = UPSTREAM_API_KEY
     else:
         api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or UPSTREAM_API_KEY
@@ -668,7 +899,10 @@ def list_models():
     
     try:
         response = requests.get(upstream_url, headers=headers, timeout=30)
-        return response.json(), response.status_code
+        try:
+            return response.json(), response.status_code
+        except ValueError:
+            return {"error": "Upstream returned non-JSON response", "upstream_body": response.text[:500]}, 502
     except requests.RequestException as e:
         return {"error": str(e)}, 502
 
@@ -677,24 +911,24 @@ if __name__ == "__main__":
     print(f"{YELLOW}=" * 60 + RESET)
     print(f"{YELLOW}Droid BYOK Proxy Server{RESET}")
     print(f"{YELLOW}=" * 60 + RESET)
-    print(f"Upstream URL: {UPSTREAM_BASE_URL}")
+    print(f"Default Upstream: {UPSTREAM_BASE_URL}")
     print(f"Listening on: http://localhost:{PROXY_PORT}")
     print(f"{YELLOW}=" * 60 + RESET)
     
     if not UPSTREAM_API_KEY:
-        print(f"\n{YELLOW}[WARNING]{RESET} UPSTREAM_API_KEY not set!")
+        print(f"\n{YELLOW}[WARNING]{RESET} No API key configured in default profile!")
     
-    # Print reasoning configuration
-    if REASONING_CONFIG.enabled:
-        print(f"\n{CYAN}[REASONING]{RESET} Enabled")
-        print(f"  Type: {REASONING_CONFIG.reasoning_type.value}")
-        print(f"  Effort: {REASONING_CONFIG.effort.value}")
-        if REASONING_CONFIG.budget_tokens:
-            print(f"  Budget Tokens: {REASONING_CONFIG.budget_tokens}")
-        print(f"  Filter <think> tags: {REASONING_CONFIG.filter_thinking_tags}")
-    else:
-        print(f"\n{DIM}[REASONING] Disabled{RESET}")
+    # Print profiles summary
+    profiles = CONFIG_MANAGER.profiles
+    print(f"\n{CYAN}[PROFILES]{RESET} {len(profiles)} profile(s) loaded:")
+    for p in profiles:
+        status = "enabled" if p.enabled else "disabled"
+        reasoning_status = f"reasoning={p.reasoning.type}" if p.reasoning.enabled else "no reasoning"
+        print(f"  - {p.name} ({status}, {reasoning_status})")
+        if p.model_patterns:
+            print(f"    Patterns: {', '.join(p.model_patterns)}")
     
+    print(f"\n{CYAN}[DEFAULT]{RESET} {CONFIG_MANAGER.default_profile_id}")
     print(f"{YELLOW}=" * 60 + RESET)
     
     app.run(host="0.0.0.0", port=PROXY_PORT, debug=False, threaded=True)

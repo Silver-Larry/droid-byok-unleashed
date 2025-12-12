@@ -51,15 +51,18 @@ def test_validate_param_valid():
     """Test validate_param with valid values."""
     config = {"type": float, "range": (0, 2)}
     
-    is_valid, warning = validate_param("temperature", 0.7, config)
+    is_valid, warning, coerced = validate_param("temperature", 0.7, config)
     assert is_valid is True
     assert warning is None
+    assert coerced == 0.7
     
-    is_valid, warning = validate_param("temperature", 0, config)
+    is_valid, warning, coerced = validate_param("temperature", 0, config)
     assert is_valid is True
+    assert coerced == 0.0
     
-    is_valid, warning = validate_param("temperature", 2, config)
+    is_valid, warning, coerced = validate_param("temperature", 2, config)
     assert is_valid is True
+    assert coerced == 2.0
     
     print("[PASS] validate_param with valid values")
 
@@ -68,11 +71,11 @@ def test_validate_param_invalid_range():
     """Test validate_param with out-of-range values."""
     config = {"type": float, "range": (0, 2)}
     
-    is_valid, warning = validate_param("temperature", 2.5, config)
+    is_valid, warning, _ = validate_param("temperature", 2.5, config)
     assert is_valid is False
     assert "out of range" in warning
     
-    is_valid, warning = validate_param("temperature", -0.5, config)
+    is_valid, warning, _ = validate_param("temperature", -0.5, config)
     assert is_valid is False
     
     print("[PASS] validate_param with invalid range")
@@ -82,9 +85,10 @@ def test_validate_param_none():
     """Test validate_param with None value."""
     config = {"type": float, "range": (0, 2)}
     
-    is_valid, warning = validate_param("temperature", None, config)
+    is_valid, warning, coerced = validate_param("temperature", None, config)
     assert is_valid is True
     assert warning is None
+    assert coerced is None
     
     print("[PASS] validate_param with None")
 

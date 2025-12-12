@@ -1,4 +1,14 @@
-import type { ModelsResponse, HealthResponse, LLMParams, ReasoningConfig, ReasoningTypesResponse, ProxyConfig, ProxyConfigUpdateResponse } from '../types';
+import type { 
+  ModelsResponse, 
+  HealthResponse, 
+  LLMParams, 
+  ReasoningTypesResponse, 
+  Profile, 
+  ProfilesResponse, 
+  ProfileTestResult,
+  ProxySettings,
+  ExportedConfig,
+} from '../types';
 import type { Config } from '../hooks/useConfig';
 
 const API_BASE = '';
@@ -34,14 +44,6 @@ export async function checkHealth(): Promise<HealthResponse> {
   return response.json();
 }
 
-export async function fetchReasoningConfig(): Promise<ReasoningConfig> {
-  const response = await fetch(`${API_BASE}/v1/config/reasoning`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch reasoning config: ${response.statusText}`);
-  }
-  return response.json();
-}
-
 export async function fetchReasoningTypes(): Promise<ReasoningTypesResponse> {
   const response = await fetch(`${API_BASE}/v1/config/reasoning/types`);
   if (!response.ok) {
@@ -50,7 +52,7 @@ export async function fetchReasoningTypes(): Promise<ReasoningTypesResponse> {
   return response.json();
 }
 
-export async function fetchProxyConfig(): Promise<ProxyConfig> {
+export async function fetchProxyConfig(): Promise<ProxySettings> {
   const response = await fetch(`${API_BASE}/v1/config/proxy`);
   if (!response.ok) {
     throw new Error(`Failed to fetch proxy config: ${response.statusText}`);
@@ -58,7 +60,7 @@ export async function fetchProxyConfig(): Promise<ProxyConfig> {
   return response.json();
 }
 
-export async function updateProxyConfig(config: Partial<ProxyConfig>): Promise<ProxyConfigUpdateResponse> {
+export async function updateProxyConfig(config: Partial<ProxySettings>): Promise<{ success: boolean; restart_required: boolean; proxy: ProxySettings }> {
   const response = await fetch(`${API_BASE}/v1/config/proxy`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -66,6 +68,99 @@ export async function updateProxyConfig(config: Partial<ProxyConfig>): Promise<P
   });
   if (!response.ok) {
     throw new Error(`Failed to update proxy config: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+// ============== Profile API ==============
+
+export async function fetchProfiles(): Promise<ProfilesResponse> {
+  const response = await fetch(`${API_BASE}/v1/config/profiles`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch profiles: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function createProfile(profile: Partial<Profile>): Promise<{ success: boolean; profile?: Profile; error?: string }> {
+  const response = await fetch(`${API_BASE}/v1/config/profiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profile),
+  });
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || `Failed to create profile: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function updateProfile(profileId: string, updates: Partial<Profile>): Promise<{ success: boolean; profile?: Profile; error?: string }> {
+  const response = await fetch(`${API_BASE}/v1/config/profiles/${profileId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || `Failed to update profile: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function deleteProfile(profileId: string): Promise<{ success: boolean; error?: string }> {
+  const response = await fetch(`${API_BASE}/v1/config/profiles/${profileId}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || `Failed to delete profile: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function testProfileMatch(model: string): Promise<ProfileTestResult> {
+  const response = await fetch(`${API_BASE}/v1/config/profiles/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to test profile match: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function setDefaultProfile(profileId: string): Promise<{ success: boolean; error?: string }> {
+  const response = await fetch(`${API_BASE}/v1/config/default-profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: profileId }),
+  });
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || `Failed to set default profile: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function exportConfig(): Promise<ExportedConfig> {
+  const response = await fetch(`${API_BASE}/v1/config/export`);
+  if (!response.ok) {
+    throw new Error(`Failed to export config: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function importConfig(config: ExportedConfig, merge = true): Promise<{ success: boolean; profiles_count?: number; error?: string }> {
+  const response = await fetch(`${API_BASE}/v1/config/import?merge=${merge}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || `Failed to import config: ${response.statusText}`);
   }
   return response.json();
 }
