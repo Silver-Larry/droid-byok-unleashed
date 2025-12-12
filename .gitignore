@@ -36,3 +36,4 @@ node_modules/
 # Config files with sensitive data
 proxy_config.json
 model_routes.json
+proxy_config.json
