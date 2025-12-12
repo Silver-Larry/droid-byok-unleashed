@@ -1,0 +1,35 @@
+{
+  "proxy": {
+    "port": 5000,
+    "api_key": ""
+  },
+  "profiles": [
+    {
+      "id": "default",
+      "name": "Default",
+      "model_patterns": [
+        "*"
+      ],
+      "match_type": "wildcard",
+      "priority": 0,
+      "enabled": true,
+      "upstream": {
+        "base_url": "https://api.deepseek.com",
+        "api_key": "your-api-key-here",
+        "api_format": "openai"
+      },
+      "llm_params": {},
+      "reasoning": {
+        "enabled": false,
+        "type": "deepseek",
+        "effort": "auto",
+        "budget_tokens": null,
+        "custom_params": {},
+        "filter_thinking_tags": true
+      },
+      "created_at": "2025-01-01T00:00:00.000000",
+      "updated_at": "2025-01-01T00:00:00.000000"
+    }
+  ],
+  "default_profile": "default"
+}

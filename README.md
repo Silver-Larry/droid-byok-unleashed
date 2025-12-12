@@ -35,7 +35,23 @@ Droid CLI  <-->  Proxy (localhost:5000)  <-->  上游 API (DeepSeek/OpenAI/Anthr
 pip install -r requirements.txt
 ```
 
-### 2. 配置环境变量
+### 2. 配置文件
+
+复制示例配置文件并填入真实配置：
+
+```bash
+# Windows
+copy proxy_config.example.json proxy_config.json
+copy model_routes.example.json model_routes.json
+
+# Linux/macOS
+cp proxy_config.example.json proxy_config.json
+cp model_routes.example.json model_routes.json
+```
+
+然后编辑 `proxy_config.json`，填入您的 API 密钥和上游服务地址。
+
+### 3. 配置环境变量（可选）
 
 复制 `.env.example` 为 `.env` 并编辑：
 
@@ -59,13 +75,13 @@ export UPSTREAM_API_KEY=your-api-key-here
 export UPSTREAM_BASE_URL=https://api.deepseek.com
 ```
 
-### 3. 启动代理服务
+### 4. 启动代理服务
 
 ```bash
 python proxy.py
 ```
 
-### 4. (可选) 启动前端
+### 5. (可选) 启动前端
 
 ```bash
 cd frontend
@@ -210,7 +226,10 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 droid-byok-unleashed/
 ├── proxy.py              # 主代理服务
 ├── proxy_config.py       # 代理配置管理
-├── proxy_config.json     # 持久化配置文件
+├── proxy_config.json     # 持久化配置文件（不提交到 Git）
+├── proxy_config.example.json  # 配置文件模板
+├── model_routes.json     # 模型路由配置（不提交到 Git）
+├── model_routes.example.json  # 路由配置模板
 ├── reasoning_config.py   # 推理模型配置
 ├── reasoning_builder.py  # 推理参数构建器
 ├── api_format_adapter.py # API 格式适配器
