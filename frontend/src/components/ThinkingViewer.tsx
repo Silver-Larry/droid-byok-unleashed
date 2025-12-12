@@ -12,6 +12,7 @@ export function ThinkingViewer({ className }: ThinkingViewerProps) {
   const [thinkingItems, setThinkingItems] = useState<ThinkingContent[]>([]);
   const [isCapturing, setIsCapturing] = useState(false);
   const [currentThinking, setCurrentThinking] = useState<string>('');
+  const currentThinkingRef = useRef<string>('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -22,6 +23,7 @@ export function ThinkingViewer({ className }: ThinkingViewerProps) {
   const startCapture = () => {
     setIsCapturing(true);
     setCurrentThinking('');
+    currentThinkingRef.current = '';
     
     // Connect to SSE endpoint for thinking content
     const eventSource = new EventSource('/v1/thinking/stream');
@@ -31,23 +33,33 @@ export function ThinkingViewer({ className }: ThinkingViewerProps) {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'thinking') {
-          setCurrentThinking(prev => prev + data.content);
+          setCurrentThinking(prev => {
+            const next = prev + (data.content ?? '');
+            currentThinkingRef.current = next;
+            return next;
+          });
         } else if (data.type === 'done') {
           // Save completed thinking
-          if (currentThinking) {
+          const captured = currentThinkingRef.current;
+          if (captured) {
             const newItem: ThinkingContent = {
               id: Date.now().toString(),
-              content: currentThinking + (data.content || ''),
+              content: captured + (data.content || ''),
               timestamp: new Date(),
               model: data.model,
             };
             setThinkingItems(prev => [...prev, newItem]);
             setCurrentThinking('');
+            currentThinkingRef.current = '';
           }
         }
       } catch {
         // Handle plain text thinking content
-        setCurrentThinking(prev => prev + event.data);
+        setCurrentThinking(prev => {
+          const next = prev + event.data;
+          currentThinkingRef.current = next;
+          return next;
+        });
       }
     };
 
@@ -55,14 +67,16 @@ export function ThinkingViewer({ className }: ThinkingViewerProps) {
       eventSource.close();
       setIsCapturing(false);
       // Save any remaining thinking content
-      if (currentThinking) {
+      const captured = currentThinkingRef.current;
+      if (captured) {
         const newItem: ThinkingContent = {
           id: Date.now().toString(),
-          content: currentThinking,
+          content: captured,
           timestamp: new Date(),
         };
         setThinkingItems(prev => [...prev, newItem]);
         setCurrentThinking('');
+        currentThinkingRef.current = '';
       }
     };
   };
@@ -74,20 +88,23 @@ export function ThinkingViewer({ className }: ThinkingViewerProps) {
     }
     setIsCapturing(false);
     // Save any current thinking
-    if (currentThinking) {
+    const captured = currentThinkingRef.current;
+    if (captured) {
       const newItem: ThinkingContent = {
         id: Date.now().toString(),
-        content: currentThinking,
+        content: captured,
         timestamp: new Date(),
       };
       setThinkingItems(prev => [...prev, newItem]);
       setCurrentThinking('');
+      currentThinkingRef.current = '';
     }
   };
 
   const clearAll = () => {
     setThinkingItems([]);
     setCurrentThinking('');
+    currentThinkingRef.current = '';
   };
 
   const formatTime = (date: Date) => {

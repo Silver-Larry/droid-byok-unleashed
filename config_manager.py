@@ -428,7 +428,13 @@ class ConfigManager:
             if "base_url" in upstream_data:
                 profile.upstream.base_url = upstream_data["base_url"]
             if "api_key" in upstream_data:
-                profile.upstream.api_key = upstream_data["api_key"]
+                # Frontend fetchProfiles() receives masked secrets like "***abcd".
+                # If it sends the masked value back on save, do NOT overwrite the real key.
+                api_key = upstream_data["api_key"]
+                if isinstance(api_key, str) and api_key.startswith("***"):
+                    pass
+                else:
+                    profile.upstream.api_key = api_key
             if "api_format" in upstream_data:
                 api_format = upstream_data["api_format"]
                 if api_format not in API_FORMAT_TYPES:
@@ -509,7 +515,12 @@ class ConfigManager:
                 restart_required = True
 
         if "api_key" in data:
-            self.proxy.api_key = data["api_key"]
+            # UI may receive masked secrets like "***abcd"; don't overwrite real key with mask.
+            api_key = data["api_key"]
+            if isinstance(api_key, str) and api_key.startswith("***"):
+                pass
+            else:
+                self.proxy.api_key = api_key
 
         if not self._save():
             return {"success": False, "error": "Failed to save configuration"}

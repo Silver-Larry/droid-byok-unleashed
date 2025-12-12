@@ -1,17 +1,19 @@
 import { useState } from 'react';
-import { Terminal, Sun, Moon, Brain, Github, Layers } from 'lucide-react';
+import { Terminal, Sun, Moon, Brain, Github, Layers, SlidersHorizontal } from 'lucide-react';
 import { Toaster } from 'sonner';
 import { useTheme } from '../hooks/useTheme';
 import { StatusBar } from './StatusBar';
 import { ThinkingViewer } from './ThinkingViewer';
 import { ProfileManager } from './ProfileManager';
+import { ProxySettingsPanel } from './ProxySettingsPanel';
 import { cn } from '../lib/utils';
 
-type Tab = 'thinking' | 'profiles';
+type Tab = 'thinking' | 'profiles' | 'proxy';
 
 const tabs: { id: Tab; label: string; icon: typeof Brain }[] = [
   { id: 'thinking', label: 'THINKING', icon: Brain },
   { id: 'profiles', label: 'PROFILES', icon: Layers },
+  { id: 'proxy', label: 'PROXY', icon: SlidersHorizontal },
 ];
 
 export function ChatWindow() {
@@ -72,6 +74,10 @@ export function ChatWindow() {
           {activeTab === 'profiles' ? (
             <main className="flex-1 overflow-auto">
               <ProfileManager />
+            </main>
+          ) : activeTab === 'proxy' ? (
+            <main className="flex-1 overflow-auto">
+              <ProxySettingsPanel />
             </main>
           ) : (
             <ThinkingViewer className="flex-1" />

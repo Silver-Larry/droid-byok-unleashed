@@ -61,6 +61,33 @@ RESET = "\033[0m"
 DIM = "\033[2m"
 
 
+def _is_undefined_value(value) -> bool:
+    # Cherry Studio (and some OpenAI-compatible clients) may send literal "[undefined]" strings.
+    return value is None or value in ("[undefined]", "undefined")
+
+
+def _prune_undefined(obj):
+    """Recursively remove keys/items whose value is None or a literal "[undefined]" string."""
+    if isinstance(obj, dict):
+        keys_to_delete = []
+        for k, v in obj.items():
+            if _is_undefined_value(v):
+                keys_to_delete.append(k)
+                continue
+            obj[k] = _prune_undefined(v)
+        for k in keys_to_delete:
+            del obj[k]
+        return obj
+    if isinstance(obj, list):
+        cleaned = []
+        for item in obj:
+            if _is_undefined_value(item):
+                continue
+            cleaned.append(_prune_undefined(item))
+        return cleaned
+    return obj
+
+
 # ===================== Thinking SSE Broadcast =====================
 
 _THINKING_SUBSCRIBERS: List[queue.Queue] = []
@@ -189,7 +216,7 @@ def sanitize_params(body):
     for param, config in LLM_PARAMS_CONFIG.items():
         if param in body:
             value = body[param]
-            if value is None:
+            if _is_undefined_value(value):
                 params_to_remove.append(param)
                 continue
             
@@ -202,6 +229,11 @@ def sanitize_params(body):
     
     for param in params_to_remove:
         del body[param]
+
+    # Remove passthrough params when client sends undefined placeholders
+    for param in list(PASSTHROUGH_PARAMS):
+        if param in body and _is_undefined_value(body.get(param)):
+            del body[param]
     
     return body
 
@@ -422,12 +454,30 @@ def process_sse_line(line, stream_filter):
     reasoning = delta.pop("reasoning", None)
     if reasoning:
         print_thinking(reasoning)
+
+    # Handle thinking field (e.g., some OpenAI-compatible providers / Zhipu)
+    thinking_field = delta.pop("thinking", None)
+    if thinking_field:
+        if isinstance(thinking_field, str):
+            print_thinking(thinking_field)
+        elif isinstance(thinking_field, dict):
+            text = thinking_field.get("content") or thinking_field.get("text")
+            if isinstance(text, str) and text:
+                print_thinking(text)
+        else:
+            # Best-effort: stringify non-empty values
+            try:
+                s = str(thinking_field)
+            except Exception:
+                s = ""
+            if s:
+                print_thinking(s)
     
     content = delta.get("content", "")
     
     if not content:
         # If we removed reasoning fields, still need to forward the modified chunk
-        if reasoning_content or reasoning:
+        if reasoning_content or reasoning or thinking_field:
             return f"data: {json.dumps(data, ensure_ascii=False)}", ""
         return line, ""
     
@@ -644,113 +694,134 @@ def filter_non_stream_response(response_data):
 @require_api_key
 def chat_completions():
     """Handle chat completion requests."""
-    # Get request body
-    body = request.get_json(silent=True)
-    if not isinstance(body, dict):
-        return {"error": "Invalid or missing JSON body"}, 400
-    model = body.get("model", "") or ""
-
-    messages = body.get("messages", [])
-    if messages is None:
-        messages = []
-    if not isinstance(messages, list):
-        return {"error": "messages must be a list"}, 400
-    body["messages"] = messages
-
-    original_keys = list(body.keys())
-    original_thinking = body.get('thinking')
-    original_reasoning_effort = body.get('reasoning_effort')
-    
-    # Log incoming request for debugging
-    print(f"\n{CYAN}[REQUEST]{RESET} Model: {model}, Stream: {body.get('stream')}")
-    print(f"{CYAN}[REQUEST]{RESET} Messages: {len(body.get('messages', []))} items")
-    
-    # Get effective config based on profile matching
-    effective_config = CONFIG_MANAGER.get_effective_config(model)
-    profile_name = effective_config.get("profile_name")
-    if profile_name:
-        print(f"{YELLOW}[PROFILE]{RESET} Matched profile: {profile_name}")
-    
-    # Debug: print original request params (before injection)
-    print(f"{CYAN}[DEBUG ORIGINAL]{RESET} Keys: {original_keys}")
-    print(f"{CYAN}[DEBUG ORIGINAL]{RESET} thinking: {original_thinking}, reasoning_effort: {original_reasoning_effort}")
-    
-    # Inject inference parameters with effective config
-    body = inject_inference_params(body, effective_config)
-    
-    # Debug: print final request params (after injection)
-    print(f"{CYAN}[DEBUG FINAL]{RESET} Keys: {list(body.keys())}")
-    print(f"{CYAN}[DEBUG FINAL]{RESET} thinking: {body.get('thinking')}")
-    
-    # Get API key and base URL from effective config
-    if CONFIG_MANAGER.proxy.api_key:
-        api_key = effective_config.get("upstream_api_key") or UPSTREAM_API_KEY
-    else:
-        api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or effective_config.get("upstream_api_key") or UPSTREAM_API_KEY
-    base_url = request.headers.get("X-Upstream-Base-URL") or effective_config.get("upstream_base_url") or UPSTREAM_BASE_URL
-    
-    # Get API format from header or effective config
-    api_format = request.headers.get("X-API-Format") or effective_config.get("upstream_api_format") or "openai"
-    
-    # Get the appropriate adapter for the API format
-    adapter = get_adapter(api_format)
-    
-    # Transform request body for the target API format
-    transformed_body = adapter.transform_request(body)
-    
-    # Get headers for the target API format
-    headers = adapter.get_headers(api_key)
-    
-    # Get the endpoint for the target API format
-    is_stream = body.get("stream", False)
-    upstream_url = adapter.get_endpoint(base_url, model=model, stream=is_stream)
-    
-    print(f"\n{YELLOW}[PROXY]{RESET} Forwarding request to {upstream_url}")
-    print(f"{YELLOW}[PROXY]{RESET} Stream mode: {is_stream}, API format: {api_format}")
-    
     try:
-        upstream_response = requests.post(
-            upstream_url,
-            headers=headers,
-            json=transformed_body,
-            stream=is_stream,
-            timeout=300
-        )
-        upstream_response.raise_for_status()
-    except requests.RequestException as e:
-        # Log detailed error info
-        print(f"{RED}[ERROR]{RESET} Request failed: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"{RED}[ERROR]{RESET} Status: {e.response.status_code}")
-            print(f"{RED}[ERROR]{RESET} Response: {e.response.text[:500]}")
-        return {"error": str(e)}, 502
+        # Get request body
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return {"error": "Invalid or missing JSON body"}, 400
+        body = _prune_undefined(body)
+        model = body.get("model", "") or ""
+
+        messages = body.get("messages", [])
+        if messages is None:
+            messages = []
+        if not isinstance(messages, list):
+            return {"error": "messages must be a list"}, 400
+        body["messages"] = messages
+
+        original_keys = list(body.keys())
+        original_thinking = body.get('thinking')
+        original_reasoning_effort = body.get('reasoning_effort')
     
-    if is_stream:
-        # Stream response with filtering
-        filter_tags = effective_config.get("filter_thinking_tags", True)
-        return Response(
-            stream_with_context(stream_response(upstream_response, api_format, filter_tags, model=model)),
-            content_type="text/event-stream; charset=utf-8",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
-        )
-    else:
-        # Non-streaming response
+        # Log incoming request for debugging
+        print(f"\n{CYAN}[REQUEST]{RESET} Model: {model}, Stream: {body.get('stream')}")
+        print(f"{CYAN}[REQUEST]{RESET} Messages: {len(body.get('messages', []))} items")
+    
+        # Get effective config based on profile matching
+        effective_config = CONFIG_MANAGER.get_effective_config(model)
+        profile_name = effective_config.get("profile_name")
+        if profile_name:
+            print(f"{YELLOW}[PROFILE]{RESET} Matched profile: {profile_name}")
+    
+        # Debug: print original request params (before injection)
+        print(f"{CYAN}[DEBUG ORIGINAL]{RESET} Keys: {original_keys}")
+        print(f"{CYAN}[DEBUG ORIGINAL]{RESET} thinking: {original_thinking}, reasoning_effort: {original_reasoning_effort}")
+    
+        # Inject inference parameters with effective config
+        body = inject_inference_params(body, effective_config)
+        body = _prune_undefined(body)
+    
+        # Debug: print final request params (after injection)
+        print(f"{CYAN}[DEBUG FINAL]{RESET} Keys: {list(body.keys())}")
+        print(f"{CYAN}[DEBUG FINAL]{RESET} thinking: {body.get('thinking')}")
+    
+        # Get API key and base URL from effective config
+        if CONFIG_MANAGER.proxy.api_key:
+            api_key = effective_config.get("upstream_api_key") or UPSTREAM_API_KEY
+        else:
+            api_key = request.headers.get("Authorization", "").replace("Bearer ", "") or effective_config.get("upstream_api_key") or UPSTREAM_API_KEY
+        base_url = request.headers.get("X-Upstream-Base-URL") or effective_config.get("upstream_base_url") or UPSTREAM_BASE_URL
+    
+        # Get API format from header or effective config
+        api_format = request.headers.get("X-API-Format") or effective_config.get("upstream_api_format") or "openai"
+    
+        # Get the appropriate adapter for the API format
+        adapter = get_adapter(api_format)
+    
+        # Transform request body for the target API format
+        transformed_body = adapter.transform_request(body)
+        transformed_body = _prune_undefined(transformed_body)
+    
+        # Get headers for the target API format
+        headers = adapter.get_headers(api_key)
+    
+        # Get the endpoint for the target API format
+        is_stream = body.get("stream", False)
+        upstream_url = adapter.get_endpoint(base_url, model=model, stream=is_stream)
+    
+        print(f"\n{YELLOW}[PROXY]{RESET} Forwarding request to {upstream_url}")
+        print(f"{YELLOW}[PROXY]{RESET} Stream mode: {is_stream}, API format: {api_format}")
+    
         try:
-            response_data = upstream_response.json()
-        except ValueError:
+            upstream_response = requests.post(
+                upstream_url,
+                headers=headers,
+                json=transformed_body,
+                stream=is_stream,
+                timeout=300
+            )
+        except requests.RequestException as e:
+            print(f"{RED}[ERROR]{RESET} Request failed: {e}")
+            return {"error": str(e)}, 502
+
+        # If upstream returns an error, pass through its status code (don't mask as 502)
+        if upstream_response.status_code >= 400:
+            try:
+                err_json = upstream_response.json()
+            except ValueError:
+                err_json = {"error": upstream_response.text[:2000]}
+
+            print(f"{RED}[UPSTREAM ERROR]{RESET} Status: {upstream_response.status_code}")
+            print(f"{RED}[UPSTREAM ERROR]{RESET} Body: {str(err_json)[:500]}")
+
+            # Ensure the client always gets JSON (not Werkzeug HTML)
             return {
-                "error": "Upstream returned non-JSON response",
+                "error": err_json.get("error") if isinstance(err_json, dict) else err_json,
                 "upstream_status": upstream_response.status_code,
-                "upstream_body": upstream_response.text[:500],
-            }, 502
-        # Transform response to OpenAI format if needed
-        transformed_response = adapter.transform_response(response_data)
-        filtered_data = filter_non_stream_response(transformed_response)
-        return filtered_data
+                "upstream": err_json,
+            }, upstream_response.status_code
+    
+        if is_stream:
+            # Stream response with filtering
+            filter_tags = effective_config.get("filter_thinking_tags", True)
+            return Response(
+                stream_with_context(stream_response(upstream_response, api_format, filter_tags, model=model)),
+                content_type="text/event-stream; charset=utf-8",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+        else:
+            # Non-streaming response
+            try:
+                response_data = upstream_response.json()
+            except ValueError:
+                return {
+                    "error": "Upstream returned non-JSON response",
+                    "upstream_status": upstream_response.status_code,
+                    "upstream_body": upstream_response.text[:500],
+                }, 502
+            # Transform response to OpenAI format if needed
+            transformed_response = adapter.transform_response(response_data)
+            filtered_data = filter_non_stream_response(transformed_response)
+            return filtered_data
+
+    except Exception as e:
+        # Avoid returning Werkzeug HTML error pages to OpenAI-compatible clients.
+        print(f"{RED}[FATAL]{RESET} Unhandled error in /v1/chat/completions: {e}")
+        return {"error": "Internal proxy error", "detail": str(e)}, 500
 
 
 @app.route("/health", methods=["GET"])
