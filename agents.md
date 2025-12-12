@@ -33,6 +33,11 @@ Droid CLI  <-->  Proxy (localhost:5000)  <-->  上游 API (DeepSeek/OpenAI/Anthr
 # 安装后端依赖
 pip install -r requirements.txt
 
+# 配置文件（推荐）
+# Windows: copy proxy_config.example.json proxy_config.json
+# Linux/macOS: cp proxy_config.example.json proxy_config.json
+# 然后编辑 proxy_config.json，设置 proxy.port / proxy.api_key，以及各 Profile 的 upstream/model_patterns/reasoning
+
 # 配置环境变量
 set UPSTREAM_API_KEY=your-api-key-here
 set UPSTREAM_BASE_URL=https://api.deepseek.com
@@ -57,14 +62,17 @@ droid config set api.baseUrl http://localhost:5000
 
 ## 环境变量
 
+`proxy_config.json` 是主配置（proxy 端口/鉴权、Profiles 路由、上游、reasoning 等）。环境变量主要用于两类场景：
+
+1. **首次启动且不存在 `proxy_config.json` 时**：用 `UPSTREAM_*` / `REASONING_*` / `FILTER_THINKING_TAGS` 生成默认 Profile
+2. **运行时默认 LLM 参数**：通过 `DEFAULT_*` 注入（当客户端未显式传入时生效）
+
 ### 基础配置
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `UPSTREAM_API_KEY` | 上游服务 API 密钥 | - |
 | `UPSTREAM_BASE_URL` | 上游服务地址 | `https://api.deepseek.com` |
-| `PROXY_PORT` | 代理监听端口 | `5000` |
-| `PROXY_API_KEY` | 本地代理服务的 API Key（可选，留空则不验证） | - |
 
 ### 默认 LLM 参数
 
@@ -95,14 +103,25 @@ droid config set api.baseUrl http://localhost:5000
 
 - `POST /v1/chat/completions` - 聊天补全（兼容 OpenAI 格式，支持流式）
 - `GET /v1/models` - 模型列表
+- `GET /v1/thinking/stream` - Thinking 内容 SSE（供前端 ThinkingViewer 使用）
 - `GET /health` - 健康检查
 
 ### 配置管理端点
 
-- `GET /v1/config/reasoning` - 获取当前推理配置
 - `GET /v1/config/reasoning/types` - 获取支持的推理类型和强度选项
 - `GET /v1/config/proxy` - 获取代理配置
 - `PUT /v1/config/proxy` - 更新代理配置
+- `GET /v1/config/profiles` - 获取全部 Profiles
+- `POST /v1/config/profiles` - 创建 Profile
+- `GET /v1/config/profiles/<profile_id>` - 获取单个 Profile
+- `PUT /v1/config/profiles/<profile_id>` - 更新 Profile
+- `DELETE /v1/config/profiles/<profile_id>` - 删除 Profile
+- `POST /v1/config/profiles/test` - 测试模型名匹配结果
+- `PUT /v1/config/default-profile` - 设置默认 Profile
+- `GET /v1/config/export` - 导出完整配置
+- `POST /v1/config/import?merge=true|false` - 导入配置（merge/replace）
+
+> 鉴权说明：若在 `proxy_config.json` 中配置了 `proxy.api_key`，则 `Authorization: Bearer ...` 用于代理鉴权；上游 `api_key` 需配置在 Profile 的 `upstream.api_key`（此时无法再通过请求头把上游 key 透传给代理）。
 
 ## 支持的 API 格式
 

@@ -49,9 +49,13 @@ cp proxy_config.example.json proxy_config.json
 
 然后编辑 `proxy_config.json`，填入您的上游服务地址与 API Key（支持按 Profile 配置不同上游/模型路由）。
 
+> 说明：代理端口与代理鉴权从 `proxy_config.json` 的 `proxy.port` / `proxy.api_key` 读取；环境变量 `PROXY_PORT` / `PROXY_API_KEY` 不会生效。
+
 ### 3. 配置环境变量（可选）
 
-复制 `.env.example` 为 `.env` 并编辑：
+> 说明：项目不会自动加载 `.env` 文件；如果你希望使用 `.env`，请在启动前用你自己的方式加载（例如 shell `set/export`、或使用 dotenv 工具）。
+
+复制 `.env.example` 为 `.env` 并按需编辑：
 
 ```bash
 # Windows
@@ -99,14 +103,17 @@ droid config set api.baseUrl http://localhost:5000
 
 ## 环境变量配置
 
+`proxy_config.json` 是主配置（Profiles/路由/上游/代理鉴权等）。环境变量主要用于两类场景：
+
+1. **首次启动且不存在 `proxy_config.json` 时**：用 `UPSTREAM_*` / `REASONING_*` / `FILTER_THINKING_TAGS` 生成默认 Profile
+2. **运行时默认 LLM 参数**：通过 `DEFAULT_*` 注入（当客户端未显式传入时生效）
+
 ### 基础配置
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `UPSTREAM_API_KEY` | 上游服务 API 密钥 | - |
 | `UPSTREAM_BASE_URL` | 上游服务地址 | `https://api.deepseek.com` |
-| `PROXY_PORT` | 代理监听端口 | `5000` |
-| `PROXY_API_KEY` | 本地代理服务的 API Key（可选，留空则不验证） | - |
 
 ### 默认 LLM 参数
 
@@ -141,6 +148,7 @@ droid config set api.baseUrl http://localhost:5000
 |------|------|------|
 | `/v1/chat/completions` | POST | 聊天补全（兼容 OpenAI 格式，支持流式） |
 | `/v1/models` | GET | 获取模型列表 |
+| `/v1/thinking/stream` | GET | Thinking 内容 SSE（供前端 ThinkingViewer 使用） |
 | `/health` | GET | 健康检查 |
 
 ### 配置管理端点
@@ -203,6 +211,9 @@ curl -X POST http://localhost:5000/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
+
+> 注意：如果在 `proxy_config.json` 里配置了 `proxy.api_key`，则请求头 `Authorization` 会被用于**代理鉴权**（而不是上游鉴权）。
+> 这时上游 `api_key` 需要写在对应 Profile 的 `upstream.api_key` 中（或使用未开启代理鉴权的模式）。
 
 ## 支持的 API 格式
 
