@@ -95,11 +95,40 @@ npm run dev
 
 ## Droid CLI 配置
 
-在 Droid CLI 中使用代理：
+### BYOK 自定义模型配置
 
-```bash
-droid config set api.baseUrl http://localhost:5000
+编辑 `~/.factory/config.json`，在 `custom_models` 数组中添加配置：
+
+```json
+{
+  "custom_models": [
+    {
+      "model_display_name": "claude-opus-4-5-byok-unleashed",
+      "model": "claude-opus-4-5",
+      "base_url": "http://localhost:5000/v1",
+      "api_key": "your-proxy-api-key",
+      "provider": "generic-chat-completion-api",
+      "max_tokens": 64000
+    }
+  ]
+}
 ```
+
+**配置说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `model_display_name` | 在 Droid CLI `/model` 选择器中显示的名称（可随意设置） |
+| `model` | 发送给代理的模型标识符（代理会根据 Profile 路由到上游） |
+| `base_url` | 代理地址，必须以 `/v1` 结尾 |
+| `api_key` | 代理鉴权密钥（对应 `proxy_config.json` 中的 `proxy.api_key`），如未配置代理鉴权可填任意值 |
+| `provider` | 必须使用 `generic-chat-completion-api`（OpenAI Chat Completions 兼容格式） |
+| `max_tokens` | 最大输出 Token 数 |
+
+> **重要提醒**：`model` 字段的值会透传到上游 API，必须是上游服务能识别的模型名称。
+
+配置完成后，在 Droid CLI 中使用 `/model` 命令即可看到自定义模型。
+
 
 ## 环境变量配置
 
